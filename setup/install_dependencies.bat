@@ -1,126 +1,151 @@
 @echo off
 chcp 65001 >nul
-title VideoTextExtractor — Install Dependencies
+title VideoTextExtractor - Install Dependencies
 
-:: ──────────────────────────────────────────────────────────────
-::  VideoTextExtractor — Dependency Installer
-::  Run this AFTER installing Python and FFmpeg (see SETUP_GUIDE.md)
-:: ──────────────────────────────────────────────────────────────
+::  VideoTextExtractor - Dependency Installer
+::  Run this AFTER installing Python and FFmpeg
 
 setlocal enabledelayedexpansion
 
-:: Detect Python
-where python >nul 2>nul
-if %ERRORLEVEL% NEQ 0 (
-    echo [ERROR] Python not found! Please install Python 3.11 or later first.
-    echo         Download from: https://www.python.org/downloads/
-    pause
-    exit /b 1
-)
-
-:: Check Python version
-python --version 2>&1 | findstr /R "3\.1[1-9]\|3\.[2-9][0-9]\|[4-9]\." >nul
-if %ERRORLEVEL% NEQ 0 (
-    echo [WARNING] Python 3.11+ recommended. You have:
-    python --version
-    echo.
-    echo           Some packages may not work on older Python versions.
-    echo           Consider upgrading if you run into issues.
-)
-
-:: Detect FFmpeg
-where ffmpeg >nul 2>nul
-if %ERRORLEVEL% NEQ 0 (
-    echo [WARNING] FFmpeg not found in PATH.
-    echo           yt-dlp and audio extraction will fail without it.
-    echo           See SETUP_GUIDE.md for installation steps.
-    echo.
-)
-
 cd /d "%~dp0.."
 
-echo ╔══════════════════════════════════════════════════╗
-echo ║  VideoTextExtractor — Dependency Installer       ║
-echo ╚══════════════════════════════════════════════════╝
+echo ============================================================
+echo  VideoTextExtractor - Dependency Installer
+echo ============================================================
 echo.
 echo Project root: %CD%
 echo.
 
-:: ── Step 1: Create virtual environment ──
+:: ---- Check Python ----
+where python >nul 2>nul
+if %ERRORLEVEL% NEQ 0 (
+    echo [ERROR] Python not found. Install Python 3.11+ and check 'Add to PATH'.
+    pause
+    exit /b 1
+)
+
+:: ---- Check Python version (must be 3.11+) ----
+python -c "import sys; exit(0 if sys.version_info>=(3,11) else 1)" >nul 2>nul
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARNING] Python 3.11+ recommended. You have:
+    python --version
+)
+
+:: ---- Check FFmpeg ----
+where ffmpeg >nul 2>nul
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARNING] FFmpeg not found. yt-dlp downloads will fail.
+)
+
+:: ---- Detect offline wheelhouse ----
+set OFFLINE_EXISTS=0
+dir "setup\offline_wheels\*.whl" >nul 2>nul
+if %ERRORLEVEL% EQU 0 set OFFLINE_EXISTS=1
+
+if %OFFLINE_EXISTS% EQU 1 (
+    echo [OK] Offline wheelhouse found: setup\offline_wheels
+    echo      Installing without internet.
+) else (
+    echo [INFO] No offline wheelhouse. Will download from internet.
+)
+echo.
+
+:: ---- Step 1: Create venv ----
 set VENV_DIR=venv
 if not exist "%VENV_DIR%\Scripts\python.exe" (
     echo [1/4] Creating virtual environment...
     python -m venv %VENV_DIR%
-    if !ERRORLEVEL! NEQ 0 (
-        echo [ERROR] Failed to create virtual environment.
+    if %ERRORLEVEL% NEQ 0 (
+        echo [ERROR] Failed to create venv.
         pause
         exit /b 1
     )
-    echo         Virtual environment created in .\%VENV_DIR%\
+    echo         Done.
 ) else (
-    echo [1/4] Virtual environment already exists, skipping.
+    echo [1/4] Virtual environment already exists.
 )
 echo.
 
-:: ── Step 2: Upgrade pip ──
+:: ---- Step 2: Upgrade pip ----
 echo [2/4] Upgrading pip...
 call "%VENV_DIR%\Scripts\pip.exe" install --upgrade pip setuptools wheel -q
 echo.
-echo         Pip version:
 call "%VENV_DIR%\Scripts\pip.exe" --version
 echo.
 
-:: ── Step 3: Install PyTorch (CPU-compatible) ──
-echo [3/4] Installing PyTorch (CPU-compatible version)...
-echo         This may take several minutes (download size ~200 MB)...
-echo.
-call "%VENV_DIR%\Scripts\pip.exe" install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu -q
-if !ERRORLEVEL! NEQ 0 (
-    echo [WARNING] PyTorch CPU install had issues, trying PyPI fallback...
-    call "%VENV_DIR%\Scripts\pip.exe" install torch -q
+:: ---- Step 3: Install PyTorch ----
+echo [3/4] Installing PyTorch (CPU-compatible)...
+if %OFFLINE_EXISTS% EQU 1 (
+    call "%VENV_DIR%\Scripts\pip.exe" install --no-index --find-links setup\offline_wheels torch torchvision torchaudio -q
+) else (
+    call "%VENV_DIR%\Scripts\pip.exe" install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --timeout 120 --retries 5 -q
+)
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARNING] PyTorch install had issues, retrying simpler install...
+    if %OFFLINE_EXISTS% EQU 1 (
+        call "%VENV_DIR%\Scripts\pip.exe" install --no-index --find-links setup\offline_wheels torch -q
+    ) else (
+        call "%VENV_DIR%\Scripts\pip.exe" install torch --timeout 120 -q
+    )
 )
 echo.
 
-:: ── Step 4: Install remaining dependencies ──
-echo [4/4] Installing remaining dependencies (%VENV_DIR%)...
-echo.
-call "%VENV_DIR%\Scripts\pip.exe" install yt-dlp openai-whisper easyocr Pillow moviepy instaloader requests pandas openpyxl google-genai curl_cffi -q
-if !ERRORLEVEL! NEQ 0 (
-    echo [ERROR] Failed to install some dependencies.
-    echo         Check your internet connection and try again.
+:: ---- Step 4: Install remaining packages ----
+echo [4/4] Installing remaining dependencies...
+if %OFFLINE_EXISTS% EQU 1 (
+    call "%VENV_DIR%\Scripts\pip.exe" install --no-index --find-links setup\offline_wheels yt-dlp openai-whisper easyocr Pillow moviepy instaloader requests pandas openpyxl google-genai google-auth google-auth-httplib2 curl_cffi -q
+) else (
+    call "%VENV_DIR%\Scripts\pip.exe" install yt-dlp openai-whisper easyocr Pillow moviepy instaloader requests pandas openpyxl google-genai google-auth google-auth-httplib2 curl_cffi --timeout 120 --retries 5 -q
+)
+if %ERRORLEVEL% NEQ 0 (
+    echo [ERROR] Failed to install packages.
+    if %OFFLINE_EXISTS% EQU 1 (
+        echo         The offline wheelhouse may be incomplete.
+    ) else (
+        echo         Check internet connection.
+    )
     pause
     exit /b 1
 )
 echo.
 
-:: ── Verify ──
-echo ════════════════════════════════════════════════════
+:: ---- Verify ----
+echo ============================================================
 echo  Verification
-echo ════════════════════════════════════════════════════
-echo.
-call "%VENV_DIR%\Scripts\python.exe" -c "import yt_dlp, google.genai, whisper, easyocr, PIL, moviepy, instaloader, requests, pandas, openpyxl, torch, curl_cffi; print('✅ All %d packages imported successfully' % len(['yt_dlp','google.genai','whisper','easyocr','PIL','moviepy','instaloader','requests','pandas','openpyxl','torch','curl_cffi']))" 2>&1
+echo ============================================================
+call "%VENV_DIR%\Scripts\python.exe" -c "import yt_dlp, google.genai, google.auth, google.oauth2.service_account, whisper, easyocr, PIL, moviepy, instaloader, requests, pandas, openpyxl, torch, curl_cffi; print('OK: all packages imported')" 2>&1
 if %ERRORLEVEL% EQU 0 (
     echo.
-    echo ╔══════════════════════════════════════════════════╗
-    echo ║  ✅  All dependencies installed successfully!    ║
-    echo ╚══════════════════════════════════════════════════╝
+    echo ============================================================
+    echo   All dependencies installed successfully!
+    echo ============================================================
     echo.
-    echo  To launch the app:
-    echo    1. Activate the environment:
-    echo       %VENV_DIR%\Scripts\activate
-    echo.
-    echo    2. Run the application:
-    echo       python main.py
-    echo.
-    echo  Or use the launcher shortcut:
-    echo       run_app.bat
+    echo  To run: double-click run.bat
 ) else (
     echo.
-    echo [WARNING] Some packages failed verification. Check output above.
+    echo [WARNING] Some packages failed verification.
 )
 echo.
 
-:: ── Create launcher batch file ──
+:: ---- Check Gemini credentials ----
+echo ============================================================
+echo  Gemini credentials check
+echo ============================================================
+if exist "data\service-account-key.json" (
+    echo [OK] Service-account key found.
+) else (
+    echo [MISSING] service-account-key.json not found.
+    echo          Case Commentary and Script Studio tabs need credentials.
+    echo          See NEW_PC_INSTALL_GUIDE.md Step 5.
+)
+if exist "data\gemini_config.json" (
+    echo [OK] gemini_config.json found.
+) else (
+    echo [INFO] No gemini_config.json yet. Created on first save in app.
+)
+echo.
+
+:: ---- Create launcher ----
 if not exist "run_app.bat" (
     echo @echo off > run_app.bat
     echo title MediaMiner Studio >> run_app.bat
