@@ -123,12 +123,26 @@ echo.
 :: ── Create launcher batch file ──
 if not exist "run_app.bat" (
     echo @echo off > run_app.bat
-    echo title VideoTextExtractor >> run_app.bat
+    echo title MediaMiner Studio >> run_app.bat
     echo cd /d "%%~dp0" >> run_app.bat
     echo set PYTHONUTF8=1 >> run_app.bat
     echo start "" "%%~dp0%VENV_DIR%\Scripts\pythonw.exe" "%%~dp0main.py" >> run_app.bat
-    echo ✅ Created run_app.bat launcher
+    echo Created run_app.bat launcher
 )
+
+:: ── Create app icon + desktop shortcut ──
+echo.
+echo Creating app icon and desktop shortcut...
+if not exist "assets\app_icon.ico" (
+    call "%VENV_DIR%\Scripts\python.exe" setup\make_icon.py
+)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0create_desktop_shortcut.ps1"
+if !ERRORLEVEL! NEQ 0 (
+    echo [WARN] Could not create the desktop shortcut automatically.
+    echo        Run setup\create_desktop_shortcut.bat later to retry.
+)
+echo.
+echo Launch MediaMiner Studio from the new Desktop icon, or run.bat
 
 echo.
 pause

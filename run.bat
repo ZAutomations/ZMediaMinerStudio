@@ -1,5 +1,5 @@
 @echo off
-title Metadata Extractor
+title MediaMiner Studio
 cd /d "%~dp0"
 
 REM ── Force UTF-8 mode (fixes ASCII encoding on Windows) ──
