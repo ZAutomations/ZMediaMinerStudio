@@ -2250,6 +2250,11 @@ class Dashboard:
             font=("Arial", 9, "bold"), bg="#2196F3", fg="white",
             command=self._cc_generate_all)
         self._cc_batch_gen_btn.pack(side=tk.LEFT, padx=2)
+        self._cc_batch_retry_btn = tk.Button(
+            bbtn_row, text="Retry Failed", state=tk.DISABLED,
+            font=("Arial", 9, "bold"), bg="#E65100", fg="white",
+            command=self._cc_retry_failed)
+        self._cc_batch_retry_btn.pack(side=tk.LEFT, padx=2)
         self._cc_batch_save_btn = tk.Button(
             bbtn_row, text="💾 Save All to Excel", state=tk.DISABLED,
             font=("Arial", 9, "bold"), bg="#4CAF50", fg="white",
@@ -2514,6 +2519,7 @@ class Dashboard:
             v["result"] = None
         self._cc_refresh_batch_list()
         self._cc_batch_gen_btn.config(state=tk.DISABLED)
+        self._cc_batch_retry_btn.config(state=tk.DISABLED)
         self._cc_batch_save_btn.config(state=tk.DISABLED)
 
         lang = self.cc_lang_var.get().strip()
@@ -2671,11 +2677,186 @@ class Dashboard:
                     fg="green" if errors == 0 else "#E65100"))
                 self.root.after(0, lambda: self._cc_batch_save_btn.config(
                     state=tk.NORMAL))
+                self.root.after(0, lambda e=errors: self._cc_batch_retry_btn.config(
+                    state=tk.NORMAL if errors > 0 else tk.DISABLED))
 
             except Exception as e:
                 self.root.after(0, lambda: self._cc_batch_prog_label.config(
                     text=f"❌ Batch error: {str(e)}", fg="red"))
                 self.root.after(0, lambda: self._cc_batch_gen_btn.config(
+                    state=tk.NORMAL))
+
+        import threading
+        threading.Thread(target=_task, daemon=True).start()
+
+    def _cc_retry_failed(self):
+        """Re-process only videos that errored, keeping successful ones intact."""
+        failed = [v for v in self._cc_batch_videos if v.get("status") == "error"]
+        if not failed:
+            return
+
+        for v in failed:
+            v["status"] = "waiting"
+            v["result"] = None
+        self._cc_refresh_batch_list()
+        self._cc_batch_gen_btn.config(state=tk.DISABLED)
+        self._cc_batch_retry_btn.config(state=tk.DISABLED)
+        self._cc_batch_save_btn.config(state=tk.DISABLED)
+
+        lang = self.cc_lang_var.get().strip()
+        niche = self.cc_niche_var.get().strip()
+        cc_slug = self._cc_selected_slug()
+        try:
+            if bool(self.cc_vertical_var.get()):
+                cc_slug = "case_commentary_longvideo"
+        except Exception:
+            pass
+
+        def _task():
+            try:
+                from core.script_generator import ScriptGenerator
+
+                api_keys = getattr(self, '_saved_api_keys', [])
+                sa_path = self.sa_path_var.get().strip()
+
+                if not api_keys and not sa_path:
+                    self.root.after(0, lambda: self._cc_batch_prog_label.config(
+                        text="❌ No API keys configured", fg="red"))
+                    self.root.after(0, lambda: self._cc_batch_gen_btn.config(
+                        state=tk.NORMAL))
+                    return
+
+                if sa_path and not api_keys:
+                    gen = ScriptGenerator(service_account_path=sa_path)
+                elif api_keys:
+                    gen = ScriptGenerator(api_keys=api_keys)
+                else:
+                    return
+
+                total = len(failed)
+                done = 0
+                errors = 0
+                prior_done = sum(1 for v in self._cc_batch_videos
+                                 if v.get("status") == "done")
+
+                for idx, v in enumerate(failed):
+                    v["status"] = "processing"
+                    self.root.after(0, lambda: self._cc_refresh_batch_list())
+                    self.root.after(0, lambda i=idx: self._cc_batch_prog_label.config(
+                        text=f"⏳ Retrying {i+1}/{total}...", fg="blue"))
+
+                    try:
+                        def status(msg):
+                            pass
+                        local_path = gen._resolve_video(None, v["path"])
+                        if isinstance(local_path, dict) and "error" in local_path:
+                            v["result"] = {"error": local_path["error"]}
+                            v["status"] = "error"
+                            errors += 1
+                            self.root.after(0, lambda: self._cc_refresh_batch_list())
+                            continue
+
+                        _cache_key = None
+                        try:
+                            _cache_key = str(Path(local_path).resolve())
+                        except Exception:
+                            pass
+                        _cached = getattr(self, '_cc_upload_cache', {})
+                        if _cache_key and _cache_key in _cached:
+                            upload = _cached[_cache_key]
+                        else:
+                            upload = gen._upload_video(local_path)
+                            if "error" not in upload and _cache_key:
+                                _cached[_cache_key] = upload
+                                self._cc_upload_cache = _cached
+                        if "error" in upload:
+                            v["result"] = {"error": upload["error"]}
+                            v["status"] = "error"
+                            errors += 1
+                            self.root.after(0, lambda: self._cc_refresh_batch_list())
+                            continue
+
+                        prompt_template = gen.get_prompt_data(cc_slug)
+                        if not prompt_template:
+                            v["result"] = {"error": "Prompt not found"}
+                            v["status"] = "error"
+                            errors += 1
+                            self.root.after(0, lambda: self._cc_refresh_batch_list())
+                            continue
+
+                        raw_template = prompt_template.get("narration_prompt", "")
+                        prompt = raw_template.replace("{language}", lang)
+                        prompt = prompt.replace("{niche_angle}", niche)
+                        try:
+                            _tgt_sec = self._cc_duration_to_sec(
+                                getattr(self, 'cc_duration_var', None).get()
+                            ) if getattr(self, 'cc_duration_var', None) else 180
+                        except (ValueError, AttributeError):
+                            _tgt_sec = 180
+                        prompt = prompt.replace("{target_duration}", str(_tgt_sec))
+
+                        context = self.cc_context_text.get("1.0", tk.END).strip() if hasattr(self, 'cc_context_text') else ""
+                        script_input = self.cc_script_text.get("1.0", tk.END).strip() if hasattr(self, 'cc_script_text') else ""
+                        if context:
+                            prompt += f"\n\n📖 CONTEXT / BACKSTORY (use this to shape the narrative):\n{context}\n"
+                        auto_ctx = self._cc_read_video_excel_metadata(v["path"])
+                        if auto_ctx:
+                            prompt += "📹 VIDEO METADATA (title, description, captions, transcript — CRITICAL: use this info as the PRIMARY source for the story. Weave these facts into a gripping narrative covering who, what, where, when, why, and how. Do NOT only describe what the video shows — tell the full incident story from this metadata):\n" + auto_ctx + "\n"
+                        if script_input:
+                            prompt += f"\n\n📝 OPTIONAL SCRIPT / DESCRIPTION (incorporate this into the narration where relevant):\n{script_input}\n"
+
+                        _bd = 0.0
+                        try:
+                            import subprocess, json as _json
+                            _probe = subprocess.run(
+                                ['ffprobe', '-v', 'error', '-show_entries',
+                                 'format=duration', '-of', 'json', local_path],
+                                capture_output=True, text=True, timeout=30)
+                            if _probe.returncode == 0:
+                                _bd = float(_json.loads(_probe.stdout).get(
+                                    'format', {}).get('duration', 0))
+                        except Exception:
+                            pass
+
+                        result = gen._call_gemini_with_file(prompt, upload,
+                                                            timeout=600,
+                                                            video_duration=_bd)
+                        if "error" in result:
+                            v["result"] = {"error": result["error"]}
+                            v["status"] = "error"
+                            errors += 1
+                        else:
+                            response_text = result.get("text", "").strip()
+                            if response_text:
+                                parsed = self._cc_parse_response(response_text)
+                                v["result"] = parsed
+                                v["status"] = "done"
+                                done += 1
+                            else:
+                                v["result"] = {"error": "Empty response"}
+                                v["status"] = "error"
+                                errors += 1
+                    except Exception as e:
+                        v["status"] = "error"
+                        v["result"] = {"error": str(e)}
+                        errors += 1
+
+                    self.root.after(0, lambda: self._cc_refresh_batch_list())
+
+                total_done = prior_done + done
+                total_errors = errors
+                self.root.after(0, lambda d=total_done, e=total_errors: self._cc_batch_prog_label.config(
+                    text=f"✅ {d} success, {e} error{'s' if e != 1 else ''}",
+                    fg="green" if errors == 0 else "#E65100"))
+                self.root.after(0, lambda: self._cc_batch_save_btn.config(
+                    state=tk.NORMAL))
+                self.root.after(0, lambda e=errors: self._cc_batch_retry_btn.config(
+                    state=tk.NORMAL if errors > 0 else tk.DISABLED))
+
+            except Exception as e:
+                self.root.after(0, lambda: self._cc_batch_prog_label.config(
+                    text=f"❌ Retry error: {str(e)}", fg="red"))
+                self.root.after(0, lambda: self._cc_batch_retry_btn.config(
                     state=tk.NORMAL))
 
         import threading
