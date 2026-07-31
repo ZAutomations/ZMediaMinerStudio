@@ -1,4 +1,4 @@
-# MediaMiner Studio
+﻿# MediaMiner Studio
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -35,8 +35,8 @@ After installing FFmpeg, add `C:\ffmpeg\bin` to your system PATH.
 
 ```batch
 :: 1. Clone or download the repository
-git clone https://github.com/ZAutomations/ZMediaMiner-Studio.git
-cd ZMediaMiner-Studio
+git clone https://github.com/ZAutomations/ZMediaMinerStudio.git
+cd ZMediaMinerStudio
 
 :: 2. Run the automated setup (creates venv, installs everything)
 setup\install_dependencies.bat
@@ -68,7 +68,7 @@ Git will show you what changed (`git log --oneline`). Your downloaded videos, co
 ## 🗂️ Project Structure
 
 ```
-ZMediaMiner-Studio/
+ZMediaMinerStudio/
 ├── main.py                    # Application entry point
 ├── config.py                  # Configuration settings
 ├── requirements.txt           # Python package list

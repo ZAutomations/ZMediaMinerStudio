@@ -1,4 +1,4 @@
-# 🖥️ New-PC Install Guide — VideoTextExtractor (Metadata Extractor)
+﻿# 🖥️ New-PC Install Guide — VideoTextExtractor (Metadata Extractor)
 
 Read this once, top to bottom, the first time you set up on a new machine.
 It also explains **why the Case Commentary and Script Studio tabs throw
@@ -62,7 +62,7 @@ your Gemini service-account key** — so Step 5 is mostly done for you.
 
 **Option B — `git clone` (smallest download).**
 ```
-git clone https://github.com/ZAutomations/ZMediaMiner-Studio.git
+git clone https://github.com/ZAutomations/ZMediaMinerStudio.git
 ```
 ⚠️ A clone does **NOT** include the `data\` folder (it is git-ignored).
 That means **no Gemini credentials come with a clone** — you must do
