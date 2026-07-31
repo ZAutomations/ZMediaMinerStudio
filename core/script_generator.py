@@ -67,8 +67,8 @@ def calc_target_word_count(video_duration_sec: float,
 class ScriptGenerator:
     """Generate cinematic narration scripts from transcripts via Gemini API"""
 
-    MODEL_NAME = "gemini-3.5-flash"
-    FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-2.0-flash-lite"]
+    MODEL_NAME = "gemini-3.6-flash"
+    FALLBACK_MODELS = ["gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
     BASE_URL_V1 = "https://generativelanguage.googleapis.com/v1"
     OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
@@ -1533,89 +1533,141 @@ Return ONLY valid JSON in this exact format (no markdown, no code fences, no exp
                 break
             tried_keys.add(self._current_key_index)
 
-            # Try primary model only (file may not work on all fallbacks)
-            url = f"{self.BASE_URL}/models/{self.MODEL_NAME}:generateContent"
-            params = {"key": key}
-            headers = {"Content-Type": "application/json"}
-            file_part = {"file_data": file_data}
-            if video_metadata is not None:
-                # video_metadata sits alongside file_data inside the Part.
-                file_part["video_metadata"] = video_metadata
-            payload = {
-                "contents": [{
-                    "parts": [
-                        file_part,
-                        {"text": prompt},
-                    ]
-                }]
-            }
-            if low_res:
-                # Low media resolution → fewer tokens per frame. Combined with
-                # the reduced fps above this keeps long videos inside the window.
-                payload["generationConfig"] = {"mediaResolution": "MEDIA_RESOLUTION_LOW"}
+            models_to_try = [self.MODEL_NAME] + self.FALLBACK_MODELS
+            original_model = self.MODEL_NAME
+            model_was_exhausted = False
+            all_traffic = True
 
-            try:
+            for model in models_to_try:
+                self.MODEL_NAME = model
+                url = f"{self.BASE_URL}/models/{model}:generateContent"
+                params = {"key": key}
+                headers = {"Content-Type": "application/json"}
+                file_part = {"file_data": file_data}
+                if video_metadata is not None:
+                    # video_metadata sits alongside file_data inside the Part.
+                    file_part["video_metadata"] = video_metadata
+                payload = {
+                    "contents": [{
+                        "parts": [
+                            file_part,
+                            {"text": prompt},
+                        ]
+                    }]
+                }
+                if low_res:
+                    # Low media resolution → fewer tokens per frame. Combined with
+                    # the reduced fps above this keeps long videos inside the window.
+                    payload["generationConfig"] = {"mediaResolution": "MEDIA_RESOLUTION_LOW"}
+
+                try:
+                    if progress_callback:
+                        progress_callback("🤖 Asking Gemini to analyze the video and write script...")
+                    response = requests.post(url, params=params, headers=headers,
+                                             json=payload, timeout=timeout)
+                    if response.status_code == 200:
+                        data = response.json()
+                        candidates = data.get("candidates", [])
+                        if candidates:
+                            content = candidates[0].get("content", {})
+                            parts = content.get("parts", [])
+                            if parts:
+                                text = parts[0].get("text", "")
+                                if text:
+                                    if model != original_model:
+                                        self.MODEL_NAME = model  # keep working model
+                                    return {"text": text}
+                        self.MODEL_NAME = original_model
+                        return {"error": "Empty response from Gemini — no content returned"}
+                    else:
+                        error_detail = ""
+                        try:
+                            err_data = response.json()
+                            err_info = err_data.get("error", {})
+                            error_detail = err_info.get("message", "") or err_info.get("status", "")
+                        except Exception:
+                            error_detail = response.text[:500]
+
+                        status = response.status_code
+                        detail_lower = error_detail.lower()
+                        is_quota = (status == 429 and ("quota" in detail_lower
+                                    or "RESOURCE_EXHAUSTED" in error_detail))
+                        # A 403 (PERMISSION_DENIED / API_KEY_SERVICE_BLOCKED) or a
+                        # 400 "API key not valid" means THIS key is bad, not that the
+                        # request is bad. Mark it exhausted and rotate to the next key
+                        # instead of aborting — otherwise one blocked key kills the
+                        # whole request even when other keys work.
+                        is_bad_key = (
+                            status == 403
+                            or "permission_denied" in detail_lower
+                            or "api_key_service_blocked" in detail_lower
+                            or "are blocked" in detail_lower
+                            or "api key not valid" in detail_lower
+                            or "invalid api key" in detail_lower
+                        )
+                        if is_quota or is_bad_key:
+                            if progress_callback:
+                                progress_callback(
+                                    f"🔄 Key #{self._current_key_index + 1} failed "
+                                    f"(HTTP {status}), trying next key..."
+                                )
+                            self._mark_current_key_exhausted()
+                            model_was_exhausted = True
+                            all_traffic = False
+                            break  # break model loop → try next key
+
+                        # Traffic / rate-limit → try next fallback model
+                        is_traffic = (
+                            (status == 429 and ("traffic" in detail_lower
+                                                or "rate" in detail_lower
+                                                or "too many requests" in detail_lower))
+                            or status == 503
+                            or "service unavailable" in detail_lower
+                            or "overloaded" in detail_lower
+                        )
+                        if is_traffic:
+                            if progress_callback:
+                                progress_callback(
+                                    f"🔄 Traffic/rate-limit on {model}, trying fallback model..."
+                                )
+                            continue  # try next model in fallback chain
+
+                        # Model not found (e.g. deprecated/renamed) → try next fallback
+                        if status == 404 or "not found" in detail_lower:
+                            if progress_callback:
+                                progress_callback(
+                                    f"⚠ Model '{model}' not found, trying fallback..."
+                                )
+                            continue
+
+                        # Non-recoverable error — return immediately
+                        self.MODEL_NAME = original_model
+                        return {
+                            "error": f"Gemini API error (HTTP {status}): {error_detail}",
+                            "_status": status,
+                        }
+
+                except requests.exceptions.Timeout:
+                    self.MODEL_NAME = original_model
+                    return {"error": "Gemini API request timed out."}
+                except requests.exceptions.ConnectionError:
+                    self.MODEL_NAME = original_model
+                    return {"error": "Failed to connect to Gemini API."}
+                except Exception as e:
+                    self.MODEL_NAME = original_model
+                    return {"error": f"Gemini API request failed: {str(e)}"}
+
+            self.MODEL_NAME = original_model
+
+            # All models tried and all returned traffic (no quota/bad_key hit)
+            if all_traffic and not model_was_exhausted:
                 if progress_callback:
-                    progress_callback("🤖 Asking Gemini to analyze the video and write script...")
-                response = requests.post(url, params=params, headers=headers,
-                                         json=payload, timeout=timeout)
-                if response.status_code == 200:
-                    data = response.json()
-                    candidates = data.get("candidates", [])
-                    if candidates:
-                        content = candidates[0].get("content", {})
-                        parts = content.get("parts", [])
-                        if parts:
-                            text = parts[0].get("text", "")
-                            if text:
-                                return {"text": text}
-                    return {"error": "Empty response from Gemini — no content returned"}
-                else:
-                    error_detail = ""
-                    try:
-                        err_data = response.json()
-                        err_info = err_data.get("error", {})
-                        error_detail = err_info.get("message", "") or err_info.get("status", "")
-                    except Exception:
-                        error_detail = response.text[:500]
-
-                    status = response.status_code
-                    detail_lower = error_detail.lower()
-                    is_quota = (status == 429 and ("quota" in detail_lower
-                                or "RESOURCE_EXHAUSTED" in error_detail))
-                    # A 403 (PERMISSION_DENIED / API_KEY_SERVICE_BLOCKED) or a
-                    # 400 "API key not valid" means THIS key is bad, not that the
-                    # request is bad. Mark it exhausted and rotate to the next key
-                    # instead of aborting — otherwise one blocked key kills the
-                    # whole request even when other keys work.
-                    is_bad_key = (
-                        status == 403
-                        or "permission_denied" in detail_lower
-                        or "api_key_service_blocked" in detail_lower
-                        or "are blocked" in detail_lower
-                        or "api key not valid" in detail_lower
-                        or "invalid api key" in detail_lower
+                    progress_callback(
+                        f"🔄 All models rate-limited on key #{self._current_key_index + 1}, "
+                        f"trying next key..."
                     )
-                    if is_quota or is_bad_key:
-                        if progress_callback:
-                            progress_callback(
-                                f"🔄 Key #{self._current_key_index + 1} failed "
-                                f"(HTTP {status}), trying next key..."
-                            )
-                        self._mark_current_key_exhausted()
-                        continue
-
-                    return {
-                        "error": f"Gemini API error (HTTP {status}): {error_detail}",
-                        "_status": status,
-                    }
-
-            except requests.exceptions.Timeout:
-                return {"error": "Gemini API request timed out."}
-            except requests.exceptions.ConnectionError:
-                return {"error": "Failed to connect to Gemini API."}
-            except Exception as e:
-                return {"error": f"Gemini API request failed: {str(e)}"}
+                self._mark_current_key_exhausted()
+                # continue outer while loop to try next key
 
         return {"error": f"All {self.get_key_count()} API key(s) failed on video request."}
 
@@ -1809,22 +1861,75 @@ Return ONLY valid JSON in this exact format (no markdown, no code fences, no exp
             ctx.append(f"Niche/topic: {niche}")
         ctx_block = ("\n".join(ctx) + "\n") if ctx else ""
 
+        # ── Courtroom niche → VS-style two-person layout ──────────
+        _is_court = bool(niche and any(
+            kw in niche.lower() for kw in ("court", "legal", "courtroom", "case commentary")))
+        if _is_court:
+            layout = (
+                "1. TWO faces side-by-side or face-to-face (keep both reference "
+                "people recognizable) — the plaintiff/accuser on one side, the "
+                "defendant/accused on the other. Each with an EXAGGERATED raw "
+                "emotion fitting their role: one side angry/accusing (pointing or "
+                "glaring), the other side shocked/defensive (covering mouth, looking "
+                "down, wide-eyed disbelief). Both faces well-lit, sharp, studio "
+                "quality.\n"
+                "2. A BOLD VERTICAL DIVIDER LINE (VS-style) splitting the frame "
+                "down the middle like a fighting-game matchup poster. Red vs blue "
+                "or dark vs light color split on each half. Glowing VS text in "
+                "the center gap in a bold font.\n"
+                "3. TWO layers of bold overlay text:\n"
+                "   — TOP (header across the whole frame): 3-6 word CTA or "
+                "question reflecting the case INSIGHT. E.g. 'WHO IS RIGHT?', "
+                "'DAUGHTER vs FATHER', 'THE FINAL VERDICT', 'SHE SUED HIM'.\n"
+                "   — BOTTOM (footer): 2-4 punchy CLICKBAIT hook words across "
+                "the bottom. Huge heavy bold all-caps, bright yellow/white with "
+                "thick black outline + drop shadow.\n"
+            )
+        else:
+            layout = (
+                "1. A large human face (keep the reference person recognizable) "
+                "with an EXAGGERATED raw emotion that fits the story — shock, "
+                "fear, anger, disbelief, tears — wide eyes, open mouth, dramatic. "
+                "Face fills a big portion of the frame, sharp studio-lit skin.\n"
+                "2. Bold, hyper-saturated high-contrast color grading with a "
+                "punchy background (dramatic glow, spotlight, or teal/orange or "
+                "red/black cinematic contrast), subtle vignette, subject rim-lit "
+                "and clearly separated from the background.\n"
+                "3. TWO layers of bold overlay text (never covering the face):\n"
+                "   — TOP (header): 3-6 word CTA or question that reflects the "
+                "case/story INSIGHT. A strong opinion or challenge that makes the "
+                "viewer NEED to know the answer. E.g. 'Will She Prove Them Wrong?', "
+                "'UNBELIEVABLE END', 'HE LIED TO ALL', 'WHAT HAPPENED NEXT'.\n"
+                "   — BOTTOM (footer): 2-4 punchy CLICKBAIT hook words in huge "
+                "heavy bold all-caps font (bright yellow/white with thick black or "
+                "red outline + drop shadow). Must trigger raw curiosity or shock.\n"
+            )
+
         instruction = (
-            "You are a world-class YouTube thumbnail art director.\n"
-            "Look at the attached ORIGINAL thumbnail for this video.\n"
+            "You are a world-class viral YouTube thumbnail art director — the "
+            "kind whose thumbnails hit 15%+ click-through. Think MrBeast, "
+            "top true-crime and drama channels.\n"
+            "The attached ORIGINAL thumbnail is only a REFERENCE for the "
+            "subject's face/identity and the story — it is boring and low-CTR. "
+            "Do NOT copy its bland layout. Your job is to design a brand-new, "
+            "aggressively CLICKABLE thumbnail from it.\n"
             f"{ctx_block}"
-            "Write a single image-generation prompt that RECREATES this exact "
-            "thumbnail — same core subject, composition, framing and mood — but "
-            "make it noticeably BETTER: sharper focus, cleaner cinematic color "
-            "grading, stronger contrast and lighting on the subject, and more "
-            "polished, higher-CTR overlay text.\n"
-            f"Target aspect ratio: {aspect}.\n"
+            "Write ONE detailed image-generation prompt for a scroll-stopping, "
+            "clickbait-style thumbnail. It MUST include, described concretely:\n"
+            f"{layout}"
+            "4. At least one attention magnet: a bold red circle or arrow "
+            "highlighting the key element, a glowing outline, or an emoji-style "
+            "reaction — whatever maximizes clicks for this story.\n"
+            "5. Depth and drama: motion, sparks, dramatic sky, courtroom/scene "
+            "context blurred behind the subject — never a flat plain shot.\n"
+            f"Target aspect ratio: {aspect}. Compose for that shape.\n"
             f"{lang_line}"
-            "Keep the subject's face (if any) recognizable and well-lit. No "
-            "watermarks, no logos, no gibberish text.\n\n"
+            "Keep all faces realistic and recognizable, well-lit and in focus. "
+            "No watermarks, no logos, no gibberish or misspelled text.\n\n"
             "Respond in EXACTLY this format, nothing else:\n"
-            "PROMPT: <the full styling prompt, one paragraph>\n"
-            "TITLE: <the short punchy overlay text to render, max 6 words>"
+            "PROMPT: <the full clickbait thumbnail prompt, one rich paragraph — "
+            "describing BOTH the top header text and bottom hook text positions>\n"
+            "TITLE: <the bottom hook text only, max 4 words>"
         )
 
         parts = [

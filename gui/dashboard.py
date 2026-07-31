@@ -128,7 +128,7 @@ class Dashboard:
         self.video_quality = tk.StringVar(value="best")
 
         # Model selection
-        self.gemini_model = tk.StringVar(value="gemini-3.5-flash")
+        self.gemini_model = tk.StringVar(value="gemini-3.6-flash")
         self.whisper_model = tk.StringVar(value="base")
 
         self.create_modern_ui()
@@ -325,9 +325,9 @@ class Dashboard:
         tk.Label(model_frame, text="🤖 Gemini Model:",
                 font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(10, 2))
         gemini_model_combo = ttk.Combobox(model_frame, textvariable=self.gemini_model,
-                                           values=["gemini-3.5-flash", "gemini-2.5-flash",
-                                                   "gemini-3.1-flash-lite", "gemini-2.0-flash-lite",
-                                                   "gemini-2.0-flash", "gemini-1.5-flash"],
+                                           values=["gemini-3.6-flash", "gemini-3.5-flash",
+                                                   "gemini-2.5-flash", "gemini-2.0-flash",
+                                                   "gemini-2.5-pro"],
                                            state="readonly", width=18)
         gemini_model_combo.pack(side=tk.LEFT, padx=(0, 20))
         gemini_model_combo.bind("<<ComboboxSelected>>", self._on_gemini_model_change)
@@ -1020,6 +1020,7 @@ class Dashboard:
         self.vs_prompt_type_menu = ttk.Combobox(opt_box, textvariable=self.vs_prompt_type_var,
                                                  state="readonly", width=42)
         self.vs_prompt_type_menu.pack(fill=tk.X, pady=(2, 5))
+        # trace_add for batch settings change is below (after _vs_batch_settings_changed def)
         self.vs_prompt_type_menu.bind(
             "<<ComboboxSelected>>", lambda _e: self._update_vs_preset_help())
 
@@ -1052,9 +1053,32 @@ class Dashboard:
                                      state="readonly", width=30)
         vs_lang_menu.pack(fill=tk.X, pady=(2, 5))
 
+        # Aspect ratio — drives rendered video AND thumbnail vertical flag
+        tk.Label(opt_box, text="🖼 Aspect ratio:").pack(anchor=tk.W)
+        self.vs_aspect_var = tk.StringVar(value="16:9 (horizontal)")
+        vs_aspect_menu = ttk.Combobox(
+            opt_box, textvariable=self.vs_aspect_var,
+            values=["16:9 (horizontal)", "9:16 (vertical)", "1:1 (square)"],
+            state="readonly", width=30)
+        vs_aspect_menu.pack(fill=tk.X, pady=(2, 5))
+
+        # When settings change after a batch run, re-enable Generate All
+        # so user can re-run with different language, niche, or prompt type.
+        def _vs_batch_settings_changed(*_):
+            if not hasattr(self, '_batch_gen_btn'):
+                return
+            self._batch_gen_btn.config(state=tk.NORMAL)
+            self._batch_save_btn.config(state=tk.DISABLED)
+            self._batch_retry_btn.config(state=tk.DISABLED)
+            self._batch_prog_label.config(text="Settings changed — ready to generate", fg="blue")
+        self.vs_prompt_type_var.trace_add("write", _vs_batch_settings_changed)
+        self.vs_lang_var.trace_add("write", _vs_batch_settings_changed)
+        self.vs_aspect_var.trace_add("write", _vs_batch_settings_changed)
+
         # Internal state: niche/style still consumed downstream but no UI
         # (the chosen Preset already defines niche and style).
         self.vs_niche_var = tk.StringVar(value="")
+        self.vs_niche_var.trace_add("write", _vs_batch_settings_changed)
         self.vs_style_pref_var = tk.StringVar(value="")
 
         # ── TTS Engine selector ─────────────────────────────────
@@ -1166,6 +1190,11 @@ class Dashboard:
             font=("Arial", 9, "bold"), bg="#4CAF50", fg="white",
             command=self._vs_save_batch_excel)
         self._batch_save_btn.pack(side=tk.LEFT, padx=2)
+        self._batch_retry_btn = tk.Button(
+            bbtn_row, text="Retry Failed", state=tk.DISABLED,
+            font=("Arial", 9, "bold"), bg="#E65100", fg="white",
+            command=self._vs_retry_failed)
+        self._batch_retry_btn.pack(side=tk.LEFT, padx=2)
         self._batch_prog_label = tk.Label(bbtn_row, text="", fg="blue",
                                           font=("Arial", 9))
         self._batch_prog_label.pack(side=tk.RIGHT, padx=4)
@@ -1428,6 +1457,7 @@ class Dashboard:
         self._vs_refresh_batch_list()
         self._batch_gen_btn.config(state=tk.DISABLED)
         self._batch_save_btn.config(state=tk.DISABLED)
+        self._batch_retry_btn.config(state=tk.DISABLED)
 
         lang = self.vs_lang_var.get().strip()
         niche = self.vs_niche_var.get().strip()
@@ -1443,10 +1473,11 @@ class Dashboard:
                 sa_path = self.sa_path_var.get().strip()
 
                 if not api_keys and not sa_path:
-                    self.root.after(0, lambda: self._batch_prog_label.config(
-                        text="❌ No API keys configured", fg="red"))
-                    self.root.after(0, lambda: self._batch_gen_btn.config(
-                        state=tk.NORMAL))
+                    self.root.after(0, lambda: (
+                        self.log("❌ No API keys configured for batch"),
+                        self._batch_prog_label.config(text="❌ No API keys configured", fg="red"),
+                        self._batch_gen_btn.config(state=tk.NORMAL),
+                    ))
                     return
 
                 if sa_path and not api_keys:
@@ -1469,11 +1500,17 @@ class Dashboard:
                 done = 0
                 errors = 0
 
+                self.root.after(0, lambda t=total: self.log(
+                    f"🚀 Batch Script Studio: {t} videos, language={lang}, niche={niche}, prompt={prompt_type_name}"))
+
                 for i, v in enumerate(self._batch_videos):
                     v["status"] = "processing"
                     self.root.after(0, lambda: self._vs_refresh_batch_list())
-                    self.root.after(0, lambda i=i: self._batch_prog_label.config(
-                        text=f"⏳ Processing {i+1}/{total}...", fg="blue"))
+                    self.root.after(0, lambda i=i, n=v["name"]: (
+                        self._batch_prog_label.config(
+                            text=f"⏳ Processing {i+1}/{total}...", fg="blue"),
+                        self.log(f"▶️ [{i+1}/{total}] {n}"),
+                    ))
 
                     try:
                         result = gen.generate_script_from_video(
@@ -1488,28 +1525,163 @@ class Dashboard:
                         if "error" in result:
                             v["status"] = "error"
                             errors += 1
+                            self.root.after(0, lambda i=i, n=v["name"],
+                                            e=result["error"][:200]: self.log(
+                                f"❌ [{i+1}/{total}] {n}: {e}"))
                         else:
                             v["status"] = "done"
                             done += 1
+                            self.root.after(0, lambda i=i, n=v["name"]: self.log(
+                                f"✅ [{i+1}/{total}] {n} — complete"))
                     except Exception as e:
                         v["status"] = "error"
                         v["result"] = {"error": str(e)}
                         errors += 1
+                        self.root.after(0, lambda i=i, n=v["name"],
+                                        e=str(e)[:200]: self.log(
+                            f"❌ [{i+1}/{total}] {n}: {e}"))
 
                     self.root.after(0, lambda: self._vs_refresh_batch_list())
 
                 # All done
-                self.root.after(0, lambda d=done, e=errors: self._batch_prog_label.config(
-                    text=f"✅ {d} success, {e} error{'s' if e != 1 else ''}",
-                    fg="green" if errors == 0 else "#E65100"))
-                self.root.after(0, lambda: self._batch_save_btn.config(
-                    state=tk.NORMAL))
+                self.root.after(0, lambda d=done, e=errors: (
+                    self.log(f"📊 Batch complete: {d} success, {e} error{'s' if e != 1 else ''}"),
+                    self._batch_prog_label.config(
+                        text=f"✅ {d} success, {e} error{'s' if e != 1 else ''}",
+                        fg="green" if errors == 0 else "#E65100"),
+                    self._batch_save_btn.config(state=tk.NORMAL),
+                    self._batch_retry_btn.config(
+                        state=tk.NORMAL if e > 0 else tk.DISABLED),
+                ))
 
             except Exception as e:
-                self.root.after(0, lambda: self._batch_prog_label.config(
-                    text=f"❌ Batch error: {str(e)}", fg="red"))
-                self.root.after(0, lambda: self._batch_gen_btn.config(
-                    state=tk.NORMAL))
+                self.root.after(0, lambda e_=str(e): (
+                    self.log(f"❌ Batch error: {e_}"),
+                    self._batch_prog_label.config(text=f"❌ Batch error: {e_}", fg="red"),
+                    self._batch_gen_btn.config(state=tk.NORMAL),
+                    self._batch_retry_btn.config(state=tk.NORMAL),
+                ))
+
+        import threading
+        threading.Thread(target=_task, daemon=True).start()
+
+    def _vs_retry_failed(self):
+        """Re-process only Script Studio videos that errored, keeping successful ones intact."""
+        failed = [v for v in self._batch_videos if v.get("status") == "error"]
+        if not failed:
+            return
+
+        for v in failed:
+            v["status"] = "waiting"
+            v["result"] = None
+        self._vs_refresh_batch_list()
+        self._batch_gen_btn.config(state=tk.DISABLED)
+        self._batch_retry_btn.config(state=tk.DISABLED)
+        self._batch_save_btn.config(state=tk.DISABLED)
+
+        lang = self.vs_lang_var.get().strip()
+        niche = self.vs_niche_var.get().strip()
+        prompt_type_name = self.vs_prompt_type_var.get().strip()
+        style_pref = self.vs_style_pref_var.get().strip()
+        context = self.vs_context_text.get("1.0", tk.END).strip()
+
+        def _task():
+            try:
+                from core.script_generator import ScriptGenerator
+
+                api_keys = getattr(self, '_saved_api_keys', [])
+                sa_path = self.sa_path_var.get().strip()
+
+                if not api_keys and not sa_path:
+                    self.root.after(0, lambda: (
+                        self.log("❌ No API keys configured for retry"),
+                        self._batch_prog_label.config(text="❌ No API keys configured", fg="red"),
+                        self._batch_gen_btn.config(state=tk.NORMAL),
+                    ))
+                    return
+
+                if sa_path and not api_keys:
+                    gen = ScriptGenerator(service_account_path=sa_path)
+                elif api_keys:
+                    gen = ScriptGenerator(api_keys=api_keys)
+                else:
+                    return
+
+                # Set active prompt from dropdown
+                slug = None
+                for s, dname, _ in gen.get_prompt_list():
+                    if dname == prompt_type_name:
+                        slug = s
+                        break
+                if slug and gen.get_prompt_data(slug):
+                    gen._active_prompt_key = slug
+
+                total = len(failed)
+                done = 0
+                errors = 0
+                prior_done = sum(1 for v in self._batch_videos
+                                 if v.get("status") == "done")
+
+                self.root.after(0, lambda t=total: self.log(
+                    f"🔄 Retrying {t} failed Script Studio video(s)..."))
+
+                for idx, v in enumerate(failed):
+                    v["status"] = "processing"
+                    self.root.after(0, lambda: self._vs_refresh_batch_list())
+                    self.root.after(0, lambda i=idx, n=v["name"]: (
+                        self._batch_prog_label.config(
+                            text=f"⏳ Retrying {i+1}/{total}...", fg="blue"),
+                        self.log(f"▶️ [{i+1}/{total}] {n} (retry)"),
+                    ))
+
+                    try:
+                        result = gen.generate_script_from_video(
+                            video_path=v["path"],
+                            language=lang,
+                            niche_angle=niche,
+                            style_preference=style_pref,
+                            context=context,
+                            upload_cache=self._vs_upload_cache,
+                        )
+                        v["result"] = result
+                        if "error" in result:
+                            v["status"] = "error"
+                            errors += 1
+                            self.root.after(0, lambda i=idx, n=v["name"],
+                                            e=result["error"][:200]: self.log(
+                                f"❌ [{i+1}/{total}] {n} (retry): {e}"))
+                        else:
+                            v["status"] = "done"
+                            done += 1
+                            self.root.after(0, lambda i=idx, n=v["name"]: self.log(
+                                f"✅ [{i+1}/{total}] {n} (retry) — complete"))
+                    except Exception as e:
+                        v["status"] = "error"
+                        v["result"] = {"error": str(e)}
+                        errors += 1
+                        self.root.after(0, lambda i=idx, n=v["name"],
+                                        e=str(e)[:200]: self.log(
+                            f"❌ [{i+1}/{total}] {n} (retry): {e}"))
+
+                    self.root.after(0, lambda: self._vs_refresh_batch_list())
+
+                total_done = prior_done + done
+                self.root.after(0, lambda d=total_done, e=errors: (
+                    self.log(f"📊 Retry complete: {d} success total, {e} error{'s' if e != 1 else ''}"),
+                    self._batch_prog_label.config(
+                        text=f"✅ {d} success total, {e} error{'s' if e != 1 else ''}",
+                        fg="green" if errors == 0 else "#E65100"),
+                    self._batch_save_btn.config(state=tk.NORMAL),
+                    self._batch_retry_btn.config(
+                        state=tk.NORMAL if errors > 0 else tk.DISABLED),
+                ))
+
+            except Exception as e:
+                self.root.after(0, lambda e_=str(e): (
+                    self.log(f"❌ Retry error: {e_}"),
+                    self._batch_prog_label.config(text=f"❌ Retry error: {e_}", fg="red"),
+                    self._batch_retry_btn.config(state=tk.NORMAL),
+                ))
 
         import threading
         threading.Thread(target=_task, daemon=True).start()
@@ -1545,11 +1717,34 @@ class Dashboard:
         try:
             import pandas as pd
             rows = []
+            # Aspect ratio → drives both the rendered video and the thumbnail flag.
+            _aspect = (self.vs_aspect_var.get() or "").split()[0] or "16:9"
+            _vertical = (_aspect == "9:16")
+            _vertical_flag = "Yes" if _vertical else "No"
+            # Shared generator for clickbait thumbnail-prompt vision calls.
+            _thumb_gen = self._build_thumbnail_gen()
+            _thumb_dir = Path(path).parent
             for v in results:
                 r = v["result"]
                 video_name = v["name"]
+                _vid = _extract_video_id(video_name)
+                # Batch works on local files; reconstruct a YouTube URL from the
+                # 11-char id so the original cover can be pulled. Non-YouTube ids
+                # simply fail the download → blank → Tool 2 frame-grab fallback.
+                _tp, _tr = "", ""
+                if _thumb_gen is not None and re.fullmatch(r'[A-Za-z0-9_-]{11}', _vid or ''):
+                    try:
+                        _tp, _tr = self._cc_build_thumbnail_prompt(
+                            _thumb_gen,
+                            f"https://www.youtube.com/watch?v={_vid}",
+                            _vid, str(_thumb_dir / "x.xlsx"),
+                            title=self.vs_niche_var.get().strip(),
+                            niche=self.vs_niche_var.get().strip(),
+                            lang=self.vs_lang_var.get().strip(), vertical=_vertical)
+                    except Exception as _bpe:
+                        print(f"[thumbnail] Script Studio batch prompt build failed: {_bpe}")
                 rows.append({
-                    "Video ID": _extract_video_id(video_name),
+                    "Video ID": _vid,
                     "Title": r.get("suggested_title", r.get("title", "")),
                     "Video File": video_name,
                     "Language": self.vs_lang_var.get().strip(),
@@ -1563,6 +1758,10 @@ class Dashboard:
                     # would leak into Custom Script and Tool 2 would read it aloud.
                     "Custom Script": self._clean_narration_script(r.get("script", "")),
                     "Word Count": r.get("generated_word_count", 0),
+                    "Thumbnail Prompt": _tp,
+                    "Thumbnail Ref": _tr,
+                    "Vertical Format": _vertical_flag,
+                    "Aspect Ratio": _aspect,
                     "Hashtag 1": r.get("hashtag_1", ""),
                     "Hashtag 2": r.get("hashtag_2", ""),
                     "Voiceover Style": r.get("voiceover_style", ""),
@@ -1921,12 +2120,53 @@ class Dashboard:
 
         # Use multi-URL results if available, otherwise fall back to single result
         rows = []
+        # Aspect ratio → drives both the rendered video and the thumbnail flag.
+        _aspect = (self.vs_aspect_var.get() or "").split()[0] or "16:9"
+        _vertical = (_aspect == "9:16")
+        _vertical_flag = "Yes" if _vertical else "No"
+        # One shared generator for clickbait thumbnail-prompt vision calls.
+        _thumb_gen = self._build_thumbnail_gen()
+        # Stable folder for the downloaded reference cover (the final .xlsx path
+        # isn't known until after rows are built, so don't depend on it here).
+        _thumb_dir = Path(__file__).parent.parent / "channels"
+        try:
+            _thumb_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            _thumb_dir = Path(__file__).parent.parent
+
+        def _vs_thumb(url, vid_id):
+            """Build a clickbait thumbnail prompt for a Script Studio row.
+
+            Reconstructs a YouTube URL from an 11-char id when the source was a
+            local file, so the original cover can still be pulled. Returns
+            (thumb_prompt, thumb_ref) — both blank on any failure/fallback.
+            """
+            if _thumb_gen is None:
+                return "", ""
+            _u = url or ""
+            if vid_id and re.fullmatch(r'[A-Za-z0-9_-]{11}', vid_id):
+                if not re.search(r'(?:v=|youtu\.be/|shorts/)' + re.escape(vid_id), _u):
+                    _u = f"https://www.youtube.com/watch?v={vid_id}"
+            if not _u:
+                return "", ""
+            try:
+                return self._cc_build_thumbnail_prompt(
+                    _thumb_gen, _u, vid_id, str(_thumb_dir / "x.xlsx"),
+                    title=self.vs_niche_var.get().strip(),
+                    niche=self.vs_niche_var.get().strip(),
+                    lang=self.vs_lang_var.get().strip(), vertical=_vertical)
+            except Exception as _te:
+                print(f"[thumbnail] Script Studio prompt build failed: {_te}")
+                return "", ""
+
         if self._vs_all_results:
             for entry in self._vs_all_results:
                 r = entry.get("result") or {}
                 url = entry.get("url", "")
+                _vid = _extract_yt_id(url) or (_extract_video_id(Path(url).name) if url else "")
+                _tp, _tr = _vs_thumb(url, _vid)
                 rows.append({
-                    "Video ID": _extract_yt_id(url) or (_extract_video_id(Path(url).name) if url else ""),
+                    "Video ID": _vid,
                     "Title": r.get("suggested_title", r.get("title", "")),
                     "Video URL": url,
                     "Language": self.vs_lang_var.get().strip(),
@@ -1934,6 +2174,10 @@ class Dashboard:
                     "Custom Title": r.get("suggested_title", ""),
                     "Custom Script": r.get("script", ""),
                     "Word Count": r.get("generated_word_count", 0),
+                    "Thumbnail Prompt": _tp,
+                    "Thumbnail Ref": _tr,
+                    "Vertical Format": _vertical_flag,
+                    "Aspect Ratio": _aspect,
                     "Hashtag 1": r.get("hashtag_1", ""),
                     "Hashtag 2": r.get("hashtag_2", ""),
                     "Voiceover Style": r.get("voiceover_style", ""),
@@ -1951,6 +2195,7 @@ class Dashboard:
             if not vid_id and first_url:
                 vid_id = _extract_video_id(Path(first_url).name)
             vid_id = vid_id or ""
+            _tp, _tr = _vs_thumb(first_url, vid_id)
             rows.append({
                 "Video ID": vid_id,
                 "Title": r.get("suggested_title", r.get("title", "")),
@@ -1960,6 +2205,10 @@ class Dashboard:
                 "Custom Title": r.get("suggested_title", ""),
                 "Custom Script": r.get("script", ""),
                 "Word Count": r.get("generated_word_count", 0),
+                "Thumbnail Prompt": _tp,
+                "Thumbnail Ref": _tr,
+                "Vertical Format": _vertical_flag,
+                "Aspect Ratio": _aspect,
                 "Hashtag 1": r.get("hashtag_1", ""),
                 "Hashtag 2": r.get("hashtag_2", ""),
                 "Voiceover Style": r.get("voiceover_style", ""),
@@ -2093,6 +2342,17 @@ class Dashboard:
                                      state="readonly", width=30)
         cc_lang_menu.pack(fill=tk.X, pady=(2, 5))
 
+        # When settings change after a batch run, re-enable Generate All
+        # so user can re-run with different language, niche, or duration.
+        def _cc_batch_settings_changed(*_):
+            if not hasattr(self, '_cc_batch_gen_btn'):
+                return
+            self._cc_batch_gen_btn.config(state=tk.NORMAL)
+            self._cc_batch_save_btn.config(state=tk.DISABLED)
+            self._cc_batch_retry_btn.config(state=tk.DISABLED)
+            self._cc_batch_prog_label.config(text="Settings changed — ready to generate", fg="blue")
+        self.cc_lang_var.trace_add("write", _cc_batch_settings_changed)
+
         # Niche / Commentary preset — each niche is its own editable prompt.
         # Any prompt whose slug starts with "case_commentary" shows up here,
         # so adding a new niche is just "Add New" in the editor (no code).
@@ -2103,6 +2363,7 @@ class Dashboard:
         self.cc_niche_menu.pack(fill=tk.X, pady=(2, 4))
         self.cc_niche_menu.bind("<<ComboboxSelected>>",
                                 lambda _e: self._cc_update_preset_help())
+        self.cc_niche_var.trace_add("write", _cc_batch_settings_changed)
 
         tk.Button(opt_box, text="✏️ Edit / Add Niche Prompt",
                   font=("Arial", 8), bg="#455A64", fg="white",
@@ -2147,6 +2408,7 @@ class Dashboard:
         tk.Label(dur_row, text="⏱ Target duration (MM:SS):",
                  font=("Arial", 9)).pack(side=tk.LEFT, padx=(0, 6))
         self.cc_duration_var = tk.StringVar(value="3:00")
+        self.cc_duration_var.trace_add("write", _cc_batch_settings_changed)
         self.cc_duration_entry = tk.Entry(
             dur_row, textvariable=self.cc_duration_var, width=8,
             font=("Arial", 9), justify=tk.CENTER)
@@ -2543,10 +2805,11 @@ class Dashboard:
                 sa_path = self.sa_path_var.get().strip()
 
                 if not api_keys and not sa_path:
-                    self.root.after(0, lambda: self._cc_batch_prog_label.config(
-                        text="❌ No API keys configured", fg="red"))
-                    self.root.after(0, lambda: self._cc_batch_gen_btn.config(
-                        state=tk.NORMAL))
+                    self.root.after(0, lambda: (
+                        self.log("❌ No API keys configured for Case Commentary batch"),
+                        self._cc_batch_prog_label.config(text="❌ No API keys configured", fg="red"),
+                        self._cc_batch_gen_btn.config(state=tk.NORMAL),
+                    ))
                     return
 
                 if sa_path and not api_keys:
@@ -2560,11 +2823,18 @@ class Dashboard:
                 done = 0
                 errors = 0
 
+                self.root.after(0, lambda t=total: self.log(
+                    f"🚀 Batch Case Commentary: {t} videos, language={lang}, niche={niche}"))
+
                 for i, v in enumerate(self._cc_batch_videos):
                     v["status"] = "processing"
                     self.root.after(0, lambda: self._cc_refresh_batch_list())
                     self.root.after(0, lambda i=i: self._cc_batch_prog_label.config(
                         text=f"⏳ Processing {i+1}/{total}...", fg="blue"))
+
+                    name = v["name"]
+                    self.root.after(0, lambda i=i, n=name: self.log(
+                        f"▶️ [{i+1}/{total}] {n} — Case Commentary"))
 
                     try:
                         # Reuse same _cc_generate logic per video
@@ -2575,6 +2845,9 @@ class Dashboard:
                             v["result"] = {"error": local_path["error"]}
                             v["status"] = "error"
                             errors += 1
+                            self.root.after(0, lambda i=i, n=name,
+                                            e=local_path["error"][:200]: self.log(
+                                f"❌ [{i+1}/{total}] {n}: {e}"))
                             self.root.after(0, lambda: self._cc_refresh_batch_list())
                             continue
 
@@ -2596,6 +2869,9 @@ class Dashboard:
                             v["result"] = {"error": upload["error"]}
                             v["status"] = "error"
                             errors += 1
+                            self.root.after(0, lambda i=i, n=name,
+                                            e=upload["error"][:200]: self.log(
+                                f"❌ [{i+1}/{total}] {n}: {e}"))
                             self.root.after(0, lambda: self._cc_refresh_batch_list())
                             continue
 
@@ -2604,6 +2880,8 @@ class Dashboard:
                             v["result"] = {"error": "Prompt not found"}
                             v["status"] = "error"
                             errors += 1
+                            self.root.after(0, lambda i=i, n=name: self.log(
+                                f"❌ [{i+1}/{total}] {n}: Prompt not found"))
                             self.root.after(0, lambda: self._cc_refresh_batch_list())
                             continue
 
@@ -2654,6 +2932,9 @@ class Dashboard:
                             v["result"] = {"error": result["error"]}
                             v["status"] = "error"
                             errors += 1
+                            self.root.after(0, lambda i=i, n=name,
+                                            e=result["error"][:200]: self.log(
+                                f"❌ [{i+1}/{total}] {n}: {e}"))
                         else:
                             response_text = result.get("text", "").strip()
                             if response_text:
@@ -2661,30 +2942,39 @@ class Dashboard:
                                 v["result"] = parsed
                                 v["status"] = "done"
                                 done += 1
+                                self.root.after(0, lambda i=i, n=name: self.log(
+                                    f"✅ [{i+1}/{total}] {n} — complete"))
                             else:
                                 v["result"] = {"error": "Empty response"}
                                 v["status"] = "error"
                                 errors += 1
+                                self.root.after(0, lambda i=i, n=name: self.log(
+                                    f"❌ [{i+1}/{total}] {n}: Empty response"))
                     except Exception as e:
                         v["status"] = "error"
                         v["result"] = {"error": str(e)}
                         errors += 1
+                        self.root.after(0, lambda i=i, n=name, e=str(e)[:200]: self.log(
+                            f"❌ [{i+1}/{total}] {n}: {e}"))
 
                     self.root.after(0, lambda: self._cc_refresh_batch_list())
 
-                self.root.after(0, lambda d=done, e=errors: self._cc_batch_prog_label.config(
-                    text=f"✅ {d} success, {e} error{'s' if e != 1 else ''}",
-                    fg="green" if errors == 0 else "#E65100"))
-                self.root.after(0, lambda: self._cc_batch_save_btn.config(
-                    state=tk.NORMAL))
-                self.root.after(0, lambda e=errors: self._cc_batch_retry_btn.config(
-                    state=tk.NORMAL if errors > 0 else tk.DISABLED))
+                self.root.after(0, lambda d=done, e=errors: (
+                    self.log(f"📊 Case Commentary batch complete: {d} success, {e} error{'s' if e != 1 else ''}"),
+                    self._cc_batch_prog_label.config(
+                        text=f"✅ {d} success, {e} error{'s' if e != 1 else ''}",
+                        fg="green" if errors == 0 else "#E65100"),
+                    self._cc_batch_save_btn.config(state=tk.NORMAL),
+                    self._cc_batch_retry_btn.config(
+                        state=tk.NORMAL if errors > 0 else tk.DISABLED),
+                ))
 
             except Exception as e:
-                self.root.after(0, lambda: self._cc_batch_prog_label.config(
-                    text=f"❌ Batch error: {str(e)}", fg="red"))
-                self.root.after(0, lambda: self._cc_batch_gen_btn.config(
-                    state=tk.NORMAL))
+                self.root.after(0, lambda e_=str(e): (
+                    self.log(f"❌ Case Commentary batch error: {e_}"),
+                    self._cc_batch_prog_label.config(text=f"❌ Batch error: {e_}", fg="red"),
+                    self._cc_batch_gen_btn.config(state=tk.NORMAL),
+                ))
 
         import threading
         threading.Thread(target=_task, daemon=True).start()
@@ -2720,10 +3010,11 @@ class Dashboard:
                 sa_path = self.sa_path_var.get().strip()
 
                 if not api_keys and not sa_path:
-                    self.root.after(0, lambda: self._cc_batch_prog_label.config(
-                        text="❌ No API keys configured", fg="red"))
-                    self.root.after(0, lambda: self._cc_batch_gen_btn.config(
-                        state=tk.NORMAL))
+                    self.root.after(0, lambda: (
+                        self.log("❌ No API keys configured for Case Commentary retry"),
+                        self._cc_batch_prog_label.config(text="❌ No API keys configured", fg="red"),
+                        self._cc_batch_gen_btn.config(state=tk.NORMAL),
+                    ))
                     return
 
                 if sa_path and not api_keys:
@@ -2739,11 +3030,18 @@ class Dashboard:
                 prior_done = sum(1 for v in self._cc_batch_videos
                                  if v.get("status") == "done")
 
+                self.root.after(0, lambda t=total: self.log(
+                    f"🔄 Retrying {t} failed Case Commentary video(s)..."))
+
                 for idx, v in enumerate(failed):
                     v["status"] = "processing"
                     self.root.after(0, lambda: self._cc_refresh_batch_list())
                     self.root.after(0, lambda i=idx: self._cc_batch_prog_label.config(
                         text=f"⏳ Retrying {i+1}/{total}...", fg="blue"))
+
+                    name = v["name"]
+                    self.root.after(0, lambda i=idx, n=name: self.log(
+                        f"▶️ [{i+1}/{total}] {n} (retry)"))
 
                     try:
                         def status(msg):
@@ -2753,6 +3051,9 @@ class Dashboard:
                             v["result"] = {"error": local_path["error"]}
                             v["status"] = "error"
                             errors += 1
+                            self.root.after(0, lambda i=idx, n=name,
+                                            e=local_path["error"][:200]: self.log(
+                                f"❌ [{i+1}/{total}] {n} (retry): {e}"))
                             self.root.after(0, lambda: self._cc_refresh_batch_list())
                             continue
 
@@ -2773,6 +3074,9 @@ class Dashboard:
                             v["result"] = {"error": upload["error"]}
                             v["status"] = "error"
                             errors += 1
+                            self.root.after(0, lambda i=idx, n=name,
+                                            e=upload["error"][:200]: self.log(
+                                f"❌ [{i+1}/{total}] {n} (retry): {e}"))
                             self.root.after(0, lambda: self._cc_refresh_batch_list())
                             continue
 
@@ -2781,6 +3085,8 @@ class Dashboard:
                             v["result"] = {"error": "Prompt not found"}
                             v["status"] = "error"
                             errors += 1
+                            self.root.after(0, lambda i=idx, n=name: self.log(
+                                f"❌ [{i+1}/{total}] {n} (retry): Prompt not found"))
                             self.root.after(0, lambda: self._cc_refresh_batch_list())
                             continue
 
@@ -2825,6 +3131,9 @@ class Dashboard:
                             v["result"] = {"error": result["error"]}
                             v["status"] = "error"
                             errors += 1
+                            self.root.after(0, lambda i=idx, n=name,
+                                            e=result["error"][:200]: self.log(
+                                f"❌ [{i+1}/{total}] {n} (retry): {e}"))
                         else:
                             response_text = result.get("text", "").strip()
                             if response_text:
@@ -2832,32 +3141,42 @@ class Dashboard:
                                 v["result"] = parsed
                                 v["status"] = "done"
                                 done += 1
+                                self.root.after(0, lambda i=idx, n=name: self.log(
+                                    f"✅ [{i+1}/{total}] {n} (retry) — complete"))
                             else:
                                 v["result"] = {"error": "Empty response"}
                                 v["status"] = "error"
                                 errors += 1
+                                self.root.after(0, lambda i=idx, n=name: self.log(
+                                    f"❌ [{i+1}/{total}] {n} (retry): Empty response"))
                     except Exception as e:
                         v["status"] = "error"
                         v["result"] = {"error": str(e)}
                         errors += 1
+                        self.root.after(0, lambda i=idx, n=name,
+                                        e=str(e)[:200]: self.log(
+                            f"❌ [{i+1}/{total}] {n} (retry): {e}"))
 
                     self.root.after(0, lambda: self._cc_refresh_batch_list())
 
                 total_done = prior_done + done
                 total_errors = errors
-                self.root.after(0, lambda d=total_done, e=total_errors: self._cc_batch_prog_label.config(
-                    text=f"✅ {d} success, {e} error{'s' if e != 1 else ''}",
-                    fg="green" if errors == 0 else "#E65100"))
-                self.root.after(0, lambda: self._cc_batch_save_btn.config(
-                    state=tk.NORMAL))
-                self.root.after(0, lambda e=errors: self._cc_batch_retry_btn.config(
-                    state=tk.NORMAL if errors > 0 else tk.DISABLED))
+                self.root.after(0, lambda d=total_done, e=total_errors: (
+                    self.log(f"📊 Case Commentary retry complete: {d} success total, {e} error{'s' if e != 1 else ''}"),
+                    self._cc_batch_prog_label.config(
+                        text=f"✅ {d} success total, {e} error{'s' if e != 1 else ''}",
+                        fg="green" if errors == 0 else "#E65100"),
+                    self._cc_batch_save_btn.config(state=tk.NORMAL),
+                    self._cc_batch_retry_btn.config(
+                        state=tk.NORMAL if errors > 0 else tk.DISABLED),
+                ))
 
             except Exception as e:
-                self.root.after(0, lambda: self._cc_batch_prog_label.config(
-                    text=f"❌ Retry error: {str(e)}", fg="red"))
-                self.root.after(0, lambda: self._cc_batch_retry_btn.config(
-                    state=tk.NORMAL))
+                self.root.after(0, lambda e_=str(e): (
+                    self.log(f"❌ Case Commentary retry error: {e_}"),
+                    self._cc_batch_prog_label.config(text=f"❌ Retry error: {e_}", fg="red"),
+                    self._cc_batch_retry_btn.config(state=tk.NORMAL),
+                ))
 
         import threading
         threading.Thread(target=_task, daemon=True).start()
@@ -2931,6 +3250,14 @@ class Dashboard:
                 r = v["result"]
                 video_name = v["name"]
                 summary = r.get("summary", "")
+                # Safety net: drop stray separator lines (---, ===) so Tool 2
+                # never voices "three dashes" as the intro voiceover.
+                _bs_lines = summary.split("\n")
+                while _bs_lines and re.fullmatch(r'[\s\-=_*]+', _bs_lines[-1]):
+                    _bs_lines.pop()
+                while _bs_lines and re.fullmatch(r'[\s\-=_*]+', _bs_lines[0]):
+                    _bs_lines.pop(0)
+                summary = "\n".join(_bs_lines).strip()
                 spots = sorted(r.get("spots", []), key=lambda s: s.get("seconds", 0))
                 spots_texts = [s.get("text", "") for s in spots]
                 all_text = summary + " " + " ".join(spots_texts)
@@ -2982,7 +3309,7 @@ class Dashboard:
                     "Video File": video_name,
                     "Language": self.cc_lang_var.get().strip(),
                     "Niche": self.cc_niche_var.get().strip(),
-                    "Custom Title": "",
+                    "Custom Title": r.get("suggested_title", ""),
                     "Custom Script": summary,
                     "Word Count": len(summary.split()),
                     "Montage Clips": clips_ref,
@@ -2998,8 +3325,8 @@ class Dashboard:
                     "Thumbnail Ref": thumb_ref,
                     "Voiceover Style": r.get("voiceover_style", ""),
                     "Voiceover Speed (WPM)": r.get("voiceover_speed", 0),
-                    "Hashtag 1": "",
-                    "Hashtag 2": "",
+                    "Hashtag 1": r.get("hashtag_1", ""),
+                    "Hashtag 2": r.get("hashtag_2", ""),
                     "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 })
             # Append/merge with existing file (skip duplicate Video IDs)
@@ -3396,6 +3723,25 @@ class Dashboard:
 
         threading.Thread(target=task, daemon=True).start()
 
+    def _build_thumbnail_gen(self):
+        """Build a ScriptGenerator for thumbnail vision calls, or None.
+
+        Reused by every Excel-export path (Case Commentary + Script Studio) so
+        the clickbait thumbnail-prompt logic is available everywhere. Returns
+        None when no Gemini credentials are configured.
+        """
+        try:
+            from core.script_generator import ScriptGenerator as _SG
+            _keys = getattr(self, '_saved_api_keys', [])
+            _sa = self.sa_path_var.get().strip()
+            if _sa and not _keys:
+                return _SG(service_account_path=_sa)
+            elif _keys:
+                return _SG(api_keys=_keys)
+        except Exception as _e:
+            print(f"[thumbnail] generator init failed: {_e}")
+        return None
+
     def _cc_build_thumbnail_prompt(self, gen, url, video_id, out_dir,
                                    title="", niche="", lang="", vertical=False):
         """Download the original thumbnail and have Gemini write a better prompt.
@@ -3447,7 +3793,8 @@ class Dashboard:
         """Parse Gemini's structured output into {summary, clips, spots, voiceover_style, voiceover_speed}."""
         result = {"summary": "", "summary_emotion": "", "disclaimer": "", "clips": [], "spots": [],
                   "voiceover_style": "", "voiceover_speed": 0,
-                  "thumbnail_ts": "", "thumbnail_sec": 0, "thumbnail_text": ""}
+                  "thumbnail_ts": "", "thumbnail_sec": 0, "thumbnail_text": "",
+                  "suggested_title": "", "hashtag_1": "", "hashtag_2": ""}
 
         if not text:
             return result
@@ -3477,6 +3824,19 @@ class Dashboard:
                     raw = re.split(
                         r'\n\s*(?:VOICEOVER\s+STYLE|VOICEOVER\s+SPEED|THUMBNAIL|MONTAGE\s+CLIPS|COMMENTARY\s+SPOTS|DISCLAIMER)\b',
                         raw, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+                    # Gemini also glues a bare separator line (---, ===, ___)
+                    # between the summary and the VOICEOVER block. The split
+                    # above cuts BEFORE the VOICEOVER marker, so that dash line
+                    # is left dangling on the end of the summary and would leak
+                    # into the spoken narration / Custom Script ("--- (three
+                    # dashes)" being read aloud). Drop any leading/trailing
+                    # lines that are only separator characters.
+                    _lines = raw.split("\n")
+                    while _lines and re.fullmatch(r'[\s\-=_*]+', _lines[0]):
+                        _lines.pop(0)
+                    while _lines and re.fullmatch(r'[\s\-=_*]+', _lines[-1]):
+                        _lines.pop()
+                    raw = "\n".join(_lines).strip()
                     # Optional leading [emotion] tag on the summary
                     emo_match = re.match(r'^\[(\w+)\]\s*(.*)', raw, re.DOTALL)
                     if emo_match:
@@ -3570,6 +3930,27 @@ class Dashboard:
             result["thumbnail_ts"] = t_ts
             result["thumbnail_sec"] = self._ts_to_sec(t_ts)
             result["thumbnail_text"] = thumb_match.group(2).strip()
+
+        # Suggested title & hashtags — parsed from the full text to stay
+        # independent of section order (some niches output them inline,
+        # others after the thumbnail).
+        title_match = re.search(
+            r'VIDEO\s+TITLE\s*:\s*(.+)',
+            text, re.IGNORECASE)
+        if title_match:
+            result["suggested_title"] = title_match.group(1).strip().strip('"').strip("'")
+        # Also accept "TITLE:" as an alias
+        title_match2 = re.search(
+            r'(?<!= )TITLE\s*:\s*(.+)',
+            text, re.IGNORECASE)
+        if title_match2 and not result["suggested_title"]:
+            result["suggested_title"] = title_match2.group(1).strip().strip('"').strip("'")
+        h1 = re.search(r'HASHTAG\s+1\s*:\s*(.+)', text, re.IGNORECASE)
+        h2 = re.search(r'HASHTAG\s+2\s*:\s*(.+)', text, re.IGNORECASE)
+        if h1:
+            result["hashtag_1"] = h1.group(1).strip().lstrip('#')
+        if h2:
+            result["hashtag_2"] = h2.group(1).strip().lstrip('#')
 
         return result
 
@@ -3785,6 +4166,14 @@ class Dashboard:
 
         # Line 1: the summary at 00:00 as the hook/opening
         summary = self._cc_last_result.get("summary", "")
+        # Safety net: strip any stray separator lines (---, ===) that may have
+        # survived parsing, so Tool 2 never voices "three dashes" as the intro.
+        _s_lines = summary.split("\n")
+        while _s_lines and re.fullmatch(r'[\s\-=_*]+', _s_lines[-1]):
+            _s_lines.pop()
+        while _s_lines and re.fullmatch(r'[\s\-=_*]+', _s_lines[0]):
+            _s_lines.pop(0)
+        summary = "\n".join(_s_lines).strip()
         summary_emo = self._cc_last_result.get("summary_emotion", "") or ""
         summary_words = len(summary.split())
         emo_part = f"| [{summary_emo}] " if summary_emo else "| "
@@ -3911,7 +4300,7 @@ class Dashboard:
             "Video URL": url,
             "Language": lang,
             "Niche": niche,
-            "Custom Title": "",
+            "Custom Title": self._cc_last_result.get("suggested_title", ""),
             "Custom Script": full_script,
             "Word Count": total_words,
             "Montage Clips": clips_ref,
@@ -3927,8 +4316,8 @@ class Dashboard:
             "Thumbnail Ref": thumb_ref,
             "Voiceover Style": self._cc_last_result.get("voiceover_style", ""),
             "Voiceover Speed (WPM)": self._cc_last_result.get("voiceover_speed", 0),
-            "Hashtag 1": "",
-            "Hashtag 2": "",
+            "Hashtag 1": self._cc_last_result.get("hashtag_1", ""),
+            "Hashtag 2": self._cc_last_result.get("hashtag_2", ""),
             "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
         }]
 
@@ -4947,6 +5336,10 @@ class Dashboard:
                     col_map["generated_script"] = raw_col
                 elif cl in ("custom title", "suggested_title", "suggested title"):
                     col_map["suggested_title"] = raw_col
+                elif cl in ("aspect ratio", "aspect_ratio", "aspect"):
+                    col_map["aspect_ratio"] = raw_col
+                elif cl in ("vertical format", "vertical_format", "vertical"):
+                    col_map["vertical_format"] = raw_col
 
             missing = [k for k in ("video_id", "speech_text") if k not in col_map]
             if missing:
@@ -5037,6 +5430,32 @@ class Dashboard:
                     if h2:
                         gen_description += f"#{h2}"
 
+                # ── Clickbait thumbnail prompt from the original cover ──
+                # video_id is an 11-char YouTube id here; reconstruct the watch
+                # URL so the published cover can be pulled and rewritten.
+                # Honor a per-row aspect ratio if the source Excel supplies one.
+                _row_aspect = ""
+                if col_map.get("aspect_ratio"):
+                    _row_aspect = str(row.get(col_map["aspect_ratio"], "") or "").split()[0] if str(row.get(col_map["aspect_ratio"], "") or "").strip() else ""
+                _row_vertical = (_row_aspect == "9:16")
+                if not _row_aspect and col_map.get("vertical_format"):
+                    _vf = str(row.get(col_map["vertical_format"], "") or "").strip().lower()
+                    if _vf in ("yes", "true", "1", "9:16", "vertical"):
+                        _row_vertical = True
+                        _row_aspect = "9:16"
+                if not _row_aspect:
+                    _row_aspect = "16:9"
+                _tp, _tr = "", ""
+                if re.fullmatch(r'[A-Za-z0-9_-]{11}', str(video_id) or ''):
+                    try:
+                        _tp, _tr = self._cc_build_thumbnail_prompt(
+                            gen,
+                            f"https://www.youtube.com/watch?v={video_id}",
+                            video_id, str(Path(excel_path).parent / "x.xlsx"),
+                            title=title, niche=niche, lang=lang, vertical=_row_vertical)
+                    except Exception as _tpe:
+                        print(f"[thumbnail] transcript-pipeline prompt build failed: {_tpe}")
+
                 # Store collected data — will write to per-language file at end
                 results_list.append({
                     "Video ID": video_id,
@@ -5050,8 +5469,14 @@ class Dashboard:
                     "Custom Title": re.sub(r'#\S+\s*', '', sug_title).strip(),
                     "Custom Description": gen_description,
                     "Custom Script": gen_script,
+                    "Thumbnail Prompt": _tp,
+                    "Thumbnail Ref": _tr,
+                    "Vertical Format": "Yes" if _row_vertical else "No",
+                    "Aspect Ratio": _row_aspect,
                     "Voiceover Style": result.get("voiceover_style", ""),
                     "Voiceover Speed (WPM)": result.get("voiceover_speed", ""),
+                    "Hashtag 1": h1,
+                    "Hashtag 2": h2,
                 })
 
                 updated_count += 1

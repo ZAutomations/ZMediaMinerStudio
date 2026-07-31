@@ -1,4 +1,4 @@
-# 📦 Git Update Guide — VideoTextExtractor
+﻿# 📦 Git Update Guide — VideoTextExtractor
 
 > ⚠️ **First-time setup?** Use **[`NEW_PC_INSTALL_GUIDE.md`](NEW_PC_INSTALL_GUIDE.md)**
 > instead — it covers Python/FFmpeg install, first clone, Gemini credentials,
@@ -22,7 +22,7 @@ from scratch.
 
 Remote URL (already set):
 ```
-https://github.com/mariafab20251-dot/Metadata-Extractor.git
+https://github.com/ZAutomations/ZMediaMinerStudio.git
 ```
 
 ---
@@ -56,15 +56,15 @@ directly from GitHub.
 ### B1 — Public repo (current state)
 
 ```
-git clone https://github.com/mariafab20251-dot/Metadata-Extractor.git
+git clone https://github.com/ZAutomations/ZMediaMinerStudio.git
 ```
 
-This creates a folder called `Metadata-Extractor` with all the code.
+This creates a folder called `ZMediaMinerStudio` with all the code.
 
 ### B2 — Private repo (after it's made private)
 
 ```
-git clone https://github.com/mariafab20251-dot/Metadata-Extractor.git
+git clone https://github.com/ZAutomations/ZMediaMinerStudio.git
 ```
 
 Git will prompt you to log in. You have two options:
@@ -79,7 +79,7 @@ Git will prompt you to log in. You have two options:
 **Option 2 — GitHub CLI**
 1. Install GitHub CLI: https://cli.github.com/
 2. Run `gh auth login` and follow the prompts
-3. Then clone normally: `git clone https://github.com/mariafab20251-dot/Metadata-Extractor.git`
+3. Then clone normally: `git clone https://github.com/ZAutomations/ZMediaMinerStudio.git`
 
 ---
 ## C) GIT PULL ON A PRIVATE REPO
