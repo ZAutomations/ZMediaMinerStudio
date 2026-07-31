@@ -62,7 +62,7 @@ your Gemini service-account key** — so Step 5 is mostly done for you.
 
 **Option B — `git clone` (smallest download).**
 ```
-git clone https://github.com/mariafab20251-dot/Metadata-Extractor.git
+git clone https://github.com/ZAutomations/ZMediaMiner-Studio.git
 ```
 ⚠️ A clone does **NOT** include the `data\` folder (it is git-ignored).
 That means **no Gemini credentials come with a clone** — you must do

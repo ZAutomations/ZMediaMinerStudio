@@ -35,8 +35,8 @@ After installing FFmpeg, add `C:\ffmpeg\bin` to your system PATH.
 
 ```batch
 :: 1. Clone or download the repository
-git clone https://github.com/mariafab20251-dot/Metadata-Extractor.git
-cd Metadata-Extractor
+git clone https://github.com/ZAutomations/ZMediaMiner-Studio.git
+cd ZMediaMiner-Studio
 
 :: 2. Run the automated setup (creates venv, installs everything)
 setup\install_dependencies.bat
@@ -68,7 +68,7 @@ Git will show you what changed (`git log --oneline`). Your downloaded videos, co
 ## 🗂️ Project Structure
 
 ```
-Metadata-Extractor/
+ZMediaMiner-Studio/
 ├── main.py                    # Application entry point
 ├── config.py                  # Configuration settings
 ├── requirements.txt           # Python package list
