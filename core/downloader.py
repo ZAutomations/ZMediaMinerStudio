@@ -174,11 +174,6 @@ class VideoDownloader:
                     "FIX: Open Settings → Instagram → Login or Extract Browser Cookies."
                 )
 
-        # Bilibili needs extra headers (Referer) or it returns 412
-        if 'bilibili.com' in yt_url:
-            ydl_opts['http_headers']['Referer'] = 'https://www.bilibili.com/'
-            ydl_opts['http_headers']['Origin'] = 'https://www.bilibili.com/'
-
         # Check if Facebook and cookies exist
         if 'facebook.com' in yt_url and not self.cookies_file.exists():
             print(f"⚠️  WARNING: Facebook downloads require cookies.txt!")
@@ -267,6 +262,11 @@ class VideoDownloader:
             },
             'progress_hooks': [_progress_hook] if progress_callback else [],
         }
+
+        # Bilibili needs extra headers (Referer) or it returns 412
+        if 'bilibili.com' in yt_url:
+            ydl_opts['http_headers']['Referer'] = 'https://www.bilibili.com/'
+            ydl_opts['http_headers']['Origin'] = 'https://www.bilibili.com/'
 
         # Add cookies if file exists — use multi-cookie rotation for Instagram
         if 'instagram.com' in yt_url:
