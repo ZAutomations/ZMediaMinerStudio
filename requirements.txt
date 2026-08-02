@@ -1,7 +1,9 @@
 # Core dependencies
 yt-dlp>=2026.07.04
-openai-whisper>=20231117
-easyocr>=1.7.0
+# STT: faster-whisper (CTranslate2, no torch) replaces openai-whisper
+faster-whisper>=1.1.0
+# OCR: RapidOCR (ONNX Runtime, ~15 MB) replaces easyocr (~94 MB + torch)
+rapidocr-onnxruntime>=1.4.0
 Pillow>=10.0.0
 moviepy>=1.0.3
 instaloader>=4.10
@@ -19,6 +21,5 @@ google-genai>=2.0.0
 google-auth>=2.23.0
 google-auth-httplib2>=0.1.1
 
-# PyTorch is installed SEPARATELY — use CPU-only index:
-#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-# Do NOT pin exact version here (breaks on different Python/PyTorch versions).
+# PyTorch REMOVED — the app is now torch-free. Heavy ML (torch) is not used
+# by this tool's OCR/STT pipeline (RapidOCR + faster-whisper).

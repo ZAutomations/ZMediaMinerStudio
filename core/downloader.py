@@ -576,17 +576,15 @@ class VideoDownloader:
     def _detect_voice_in_audio(self, audio_path):
         """Detect if audio contains human voice/speech using Whisper"""
         try:
-            import whisper
+            from faster_whisper import WhisperModel
             print(f"🔍 Checking for voiceover...")
 
-            # Load a small Whisper model for quick detection
-            model = whisper.load_model("tiny")
+            # Load a small faster-whisper model for quick detection (no torch)
+            model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
             # Transcribe the audio
-            result = model.transcribe(str(audio_path), language="en", fp16=False)
-
-            # Check if any text was detected
-            transcription = result.get("text", "").strip()
+            segments, _ = model.transcribe(str(audio_path), language="en")
+            transcription = " ".join(seg.text.strip() for seg in segments).strip()
 
             # Consider it has voice if:
             # 1. Transcription has at least 10 characters

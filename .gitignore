@@ -10,6 +10,7 @@ build/
 # Virtual environment
 venv/
 .venv/
+venv_light/
 
 # IDE
 .vscode/
@@ -50,6 +51,7 @@ setup/offline_wheels/
 
 # Junk / temp files
 *.zip
+_pip_install_log.txt
 "New Text Document.txt"
 SpinLinks.txt
 check_missing.py

@@ -1,15 +1,15 @@
-import whisper
-import easyocr
+from faster_whisper import WhisperModel
+from rapidocr_onnxruntime import RapidOCR
 from PIL import Image, ImageEnhance, ImageFilter
 from moviepy import VideoFileClip
 import os
 import re
 import warnings
-from config import FRAME_INTERVAL, WHISPER_MODEL, WHISPER_MODEL_DIR, EASYOCR_MODEL_DIR
+from config import FRAME_INTERVAL, WHISPER_MODEL, WHISPER_MODEL_DIR
 
 # Suppress annoying warnings
-warnings.filterwarnings('ignore', category=UserWarning, module='torch')
-warnings.filterwarnings('ignore', category=UserWarning, module='whisper')
+warnings.filterwarnings('ignore', category=UserWarning, module='onnxruntime')
+warnings.filterwarnings('ignore', category=UserWarning, module='faster_whisper')
 warnings.filterwarnings('ignore', message='.*pin_memory.*')
 warnings.filterwarnings('ignore', message='.*FP16 is not supported on CPU.*')
 
@@ -20,30 +20,23 @@ class MediaExtractor:
 
     def load_whisper(self):
         if self.whisper_model is None:
-            print("🔄 Loading Whisper model...")
-            # Use local model if bundled in portable package, else download
-            if WHISPER_MODEL_DIR.exists() and (WHISPER_MODEL_DIR / f"{WHISPER_MODEL}.pt").exists():
-                self.whisper_model = whisper.load_model(WHISPER_MODEL, download_root=str(WHISPER_MODEL_DIR))
-                print(f"✅ Whisper model loaded from: {WHISPER_MODEL_DIR}")
-            else:
-                self.whisper_model = whisper.load_model(WHISPER_MODEL)
-                print("✅ Whisper model loaded (downloaded)")
+            print("🔄 Loading Whisper model (faster-whisper)...")
+            # faster-whisper: CTranslate2 backend, no torch. CPU int8 for speed.
+            self.whisper_model = WhisperModel(
+                WHISPER_MODEL,
+                device="cpu",
+                compute_type="int8",
+                download_root=str(WHISPER_MODEL_DIR) if WHISPER_MODEL_DIR.exists() else None,
+            )
+            print("✅ Whisper model loaded")
 
     def load_easyocr(self):
         if self.ocr_reader is None:
-            # Initialize EasyOCR with English language
-            # gpu=False for CPU, set to True if you have CUDA GPU
-            print("🔄 Loading OCR model...")
-            # Use local models if bundled, else download
-            if EASYOCR_MODEL_DIR.exists() and any(EASYOCR_MODEL_DIR.glob("*.pth")):
-                self.ocr_reader = easyocr.Reader(
-                    ['en'], gpu=False, verbose=False,
-                    model_storage_directory=str(EASYOCR_MODEL_DIR),
-                )
-                print(f"✅ OCR model loaded from: {EASYOCR_MODEL_DIR}")
-            else:
-                self.ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-                print("✅ OCR model loaded (downloaded)")
+            # RapidOCR (ONNX Runtime) — replaces EasyOCR, no torch needed.
+            # ONNX models are auto-downloaded on first use (~15 MB, en+ch).
+            print("🔄 Loading OCR model (RapidOCR)...")
+            self.ocr_reader = RapidOCR()
+            print("✅ OCR model loaded")
 
     def clean_ocr_text(self, text):
         """Clean and normalize OCR text"""
@@ -386,12 +379,14 @@ class MediaExtractor:
                     img = Image.fromarray(frame)
                     img = self.preprocess_image(img)
 
-                    # Convert to numpy array for EasyOCR
+                    # Convert to numpy array for RapidOCR
                     import numpy as np
                     frame_np = np.array(img)
 
-                    # Extract text using EasyOCR (accepts numpy arrays directly)
-                    results = self.ocr_reader.readtext(frame_np)
+                    # Extract text using RapidOCR — returns (result, elapse).
+                    # result is a list of [box, text, score] or None if empty.
+                    ocr_result, _ = self.ocr_reader(frame_np)
+                    results = ocr_result if ocr_result else []
 
                     # Sort results by Y-coordinate (top to bottom) for proper reading order
                     sorted_results = sorted(results, key=lambda x: x[0][0][1])
@@ -466,5 +461,6 @@ class MediaExtractor:
 
         self.load_whisper()
 
-        result = self.whisper_model.transcribe(video_path)
-        return result["text"].strip()
+        # faster-whisper returns a generator of segments — join their text.
+        segments, _ = self.whisper_model.transcribe(video_path)
+        return " ".join(segment.text.strip() for segment in segments).strip()
