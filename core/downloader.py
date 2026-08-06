@@ -232,7 +232,19 @@ class VideoDownloader:
                 'b'                       # last resort (may be silent HEVC)
             )
         else:
+            # Prefer H.264 (avc1) so the whole downstream pipeline (MoviePy,
+            # OpenCV renderer, silence removal) runs at full speed instead of
+            # crawling on AV1/VP9 at 1080p+. YouTube only serves H.264 up to
+            # 1080p height — for vertical videos that caps the download at
+            # 608×1080, which the user accepted for the speed win. The h264 and
+            # avc1 branches are the same thing (yt-dlp labels YouTube H.264 as
+            # avc1.*); keep both like the TikTok path above. Later branches fall
+            # back to AV1/VP9 for platforms/resolutions with no H.264 stream.
             fmt = (
+                f'bv*[vcodec^=h264][height<={max_h}]+ba/'
+                f'b[vcodec^=h264][height<={max_h}][acodec!=none]/'
+                f'bv*[vcodec^=avc][height<={max_h}]+ba/'
+                f'b[vcodec^=avc][height<={max_h}][acodec!=none]/'
                 f'bv*[height<={max_h}]+ba/'
                 f'b[height<={max_h}][acodec!=none]/'
                 f'bv*+ba/'
@@ -434,6 +446,27 @@ class VideoDownloader:
                         f"Your cookies are expired. Re-export cookies.txt from browser."
                     )
 
+                # TikTok anti-bot: TikTok serves an intermittent JS challenge
+                # when it senses bursts of automated requests. Some videos pass
+                # cleanly, others get the challenge — the failure is per-request
+                # and transient, so a retry on a fresh connection usually works.
+                # This is the #1 source of "4 out of 10 failed" batch downloads.
+                _tt_markers = (
+                    'unexpected response from webpage request',
+                    'unable to extract universal data',
+                    'solving js challenge',
+                )
+                _is_tt_challenge = (
+                    'tiktok.com' in url
+                    and any(m in error_msg.lower() for m in _tt_markers)
+                )
+                if _is_tt_challenge and attempt < MAX_RETRY_474 + 1:
+                    last_error = e
+                    print(f"   ⚠️  TikTok anti-bot challenge — will retry on a fresh connection")
+                    if progress_callback:
+                        progress_callback("   ⏳ TikTok rate-limit — retrying...")
+                    continue
+
                 # Transient network / TLS corruption — the encrypted stream got
                 # scrambled in transit (often an antivirus/firewall doing HTTPS
                 # inspection, a flaky VPN, or a bad link). These almost always
@@ -465,6 +498,22 @@ class VideoDownloader:
                         "(the #1 cause on Windows)\n"
                         "  • Turn a VPN/proxy off (or switch exit node)\n"
                         "  • Check your Wi-Fi / network stability, then retry\n\n"
+                        f"Details: {error_msg}"
+                    )
+
+                # TikTok retries exhausted — explain that it's a rate-limit, not
+                # a permanent failure, and the retry-safe option.
+                if _is_tt_challenge:
+                    raise Exception(
+                        "❌ TikTok kept blocking this video with an anti-bot "
+                        "challenge (rate-limiting) even after retries.\n\n"
+                        "This is TEMPORARY, not a broken video. Try:\n"
+                        "  • Wait 2-5 minutes, then use 'Retry Failed' to re-run "
+                        "only the failed videos\n"
+                        "  • Slow down batch size (fewer videos per batch = fewer "
+                        "challenges)\n"
+                        "  • Export TikTok cookies to cookies.txt for a smoother "
+                        "rate limit\n\n"
                         f"Details: {error_msg}"
                     )
 
