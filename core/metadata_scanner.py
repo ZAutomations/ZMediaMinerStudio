@@ -14,6 +14,11 @@ class MetadataScanner:
         self.yt_dlp = [sys.executable, "-m", "yt_dlp"]
         self.instagram_scraper = None
         self.facebook_scraper = None
+        # TikTok now blocks anonymous profile enumeration — the downloader passes
+        # data/cookies.txt and that is what makes profile listing work vs 0 videos.
+        # Mirror the same path for the scanner so it carries the same session.
+        _proj_root = Path(__file__).resolve().parent.parent  # core/ -> project root
+        self.cookies_file = _proj_root / "data" / "cookies.txt"
 
     def run_cmd(self, cmd):
         """Run command and return output"""
@@ -36,6 +41,11 @@ class MetadataScanner:
         cmd = self.yt_dlp + ["--no-warnings", "--dump-json", url]
         if flat:
             cmd.insert(-1, "--flat-playlist")
+        # Pass cookies so platforms that block anonymous access (TikTok) can
+        # enumerate profiles. yt-dlp filters the cookie jar by domain, so a
+        # shared cookies.txt is safe for all platforms.
+        if getattr(self, "cookies_file", None) and self.cookies_file.exists():
+            cmd += ["--cookies", str(self.cookies_file)]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
         entries = []
         for line in proc.stdout:
@@ -232,10 +242,77 @@ class MetadataScanner:
         if progress_callback:
             progress_callback("Fetching TikTok profile entries...")
 
-        entries = self.get_playlist_entries(profile_url)
-        total = len(entries)
+        import re as _re
+        _vid_m = _re.search(r"/video/(\d+)", profile_url)
+        username = profile_url.split("@")[-1].split("/")[0].strip("/") or "tiktok"
 
-        username = profile_url.split("@")[-1].strip("/")
+        # 1) Video URL -> bootstrap sec_uid from the video, then list profile.
+        if _vid_m:
+            if progress_callback:
+                progress_callback("🎯 Video URL detected — reading creator ID to list full profile...")
+            sec = self._tiktok_secuid_from_video(profile_url, progress_callback)
+            if sec:
+                return self._scan_tiktok_by_secuid(sec, username, max_videos, progress_callback)
+
+        # 2) @username path
+
+        # TikTok intermittently serves a JS anti-bot challenge that makes
+        # yt-dlp emit 0 JSON lines instead of failing loudly — so the scan
+        # silently reports "Found 0 videos". Retry on a fresh connection,
+        # same as the downloader's TikTok retry (verified to succeed on retry).
+        MAX_TT_ATTEMPTS = 3
+        _tt_hard_marker = "secondary user id"
+        _tt_challenge_markers = (
+            "unexpected response",   # "Unexpected response from webpage request"
+            "universal data",        # "Unable to extract universal data for rehydration"
+            "js challenge",          # "Solving JS challenge using native Python implementation"
+            "sign in to confirm",    # bot interstitial
+            _tt_hard_marker,
+        )
+
+        entries = []
+        last_err = ""
+        for attempt in range(1, MAX_TT_ATTEMPTS + 1):
+            stderr_buf = []
+            entries = self.get_playlist_entries(
+                profile_url, flat=True, progress_callback=progress_callback, stderr=stderr_buf
+            )
+            if entries:
+                break
+            err_text = "".join(stderr_buf).lower()
+            last_err = err_text
+            # Hard block: TikTok hid the sec_uid behind a challenge. Try to
+            # resolve it from the profile page ourselves.
+            if _tt_hard_marker in err_text:
+                sec = self._resolve_tiktok_secuid(username, progress_callback)
+                if sec:
+                    return self._scan_tiktok_by_secuid(sec, username, max_videos, progress_callback)
+                break
+            if any(m in err_text for m in _tt_challenge_markers) and attempt < MAX_TT_ATTEMPTS:
+                if progress_callback:
+                    progress_callback(
+                        f"   ⚠️  TikTok anti-bot challenge — retrying ({attempt}/{MAX_TT_ATTEMPTS})..."
+                    )
+                time.sleep(20)
+                continue
+            break
+
+        if not entries:
+            raise Exception(
+                "❌ TikTok blocked this profile scan.\n\n"
+                "TikTok now requires the creator's numeric channel ID (sec_uid) to "
+                "list videos, and it hides that ID behind a bot-challenge on the "
+                "profile page. This is a platform-side block, not a broken video.\n\n"
+                "What works right now:\n"
+                "  • Paste a VIDEO URL from this creator (e.g. "
+                "https://www.tiktok.com/@user/video/12345). The scanner reads the "
+                "creator's ID from that one video and lists the whole profile.\n"
+                "  • Or wait a few minutes (TikTok rate-limits repeated requests) and "
+                "use 'Retry Failed'.\n\n"
+                f"Details: {last_err[:300]}"
+            )
+
+        total = len(entries)
 
         if progress_callback:
             progress_callback(f"Found {total} videos in @{username}")
@@ -277,6 +354,125 @@ class MetadataScanner:
             "total_entries": total,
             "videos": videos
         }
+
+    def _scan_tiktok_by_secuid(self, sec_uid, username, max_videos, progress_callback=None):
+        """List a creator's videos via the numeric channel id (sec_uid)."""
+        if progress_callback:
+            progress_callback(f"📡 Listing creator via channel ID (sec_uid)...")
+        entries = []
+        last_err = ""
+        for attempt in range(1, 4):
+            stderr_buf = []
+            entries = self.get_playlist_entries(
+                f"tiktokuser:{sec_uid}", flat=True,
+                progress_callback=progress_callback, stderr=stderr_buf
+            )
+            if entries:
+                break
+            err_text = "".join(stderr_buf).lower()
+            last_err = err_text
+            if any(m in err_text for m in ("unexpected response", "universal data", "js challenge")) \
+                    and attempt < 3:
+                if progress_callback:
+                    progress_callback(f"   ⚠️  TikTok anti-bot challenge — retrying ({attempt}/3)...")
+                time.sleep(20)
+                continue
+            break
+        total = len(entries)
+        if progress_callback:
+            progress_callback(f"Found {total} videos in @{username}")
+        videos = []
+        for i, entry in enumerate(entries, 1):
+            if max_videos and len(videos) >= max_videos:
+                break
+            vid_id = entry.get("id") or entry.get("url")
+            title = entry.get("title", "")
+            if not vid_id:
+                continue
+            video_url = entry.get("url") or f"https://www.tiktok.com/@{username}/video/{vid_id}"
+            videos.append({
+                "video_id": vid_id,
+                "title": title,
+                "username": username,
+                "description": entry.get("description") or title,
+                "url": video_url,
+                "duration": entry.get("duration", 0),
+                "view_count": entry.get("view_count", 0) or 0,
+            })
+            if progress_callback and i % 10 == 0:
+                progress_callback(f"Scanning... {i}/{total}")
+        return {
+            "channel_name": username,
+            "platform": "tiktok",
+            "total_entries": total,
+            "videos": videos,
+        }
+
+    def _tiktok_secuid_from_video(self, video_url, progress_callback=None):
+        """Extract the uploader's sec_uid (channel_id) from one video.
+
+        Uses the intermittent-but-working download path. Returns sec_uid or None.
+        """
+        for attempt in range(1, 4):
+            try:
+                cmd = self.yt_dlp + ["--no-warnings", "--dump-json", video_url]
+                if getattr(self, "cookies_file", None) and self.cookies_file.exists():
+                    cmd += ["--cookies", str(self.cookies_file)]
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+                out = (proc.stdout or "").strip()
+                if out:
+                    import json as _json
+                    d = _json.loads(out)
+                    sec = d.get("channel_id") or d.get("uploader_id")
+                    if sec:
+                        return sec
+            except Exception:
+                pass
+            if attempt < 3:
+                if progress_callback:
+                    progress_callback(f"   ⚠️  TikTok anti-bot challenge on video — retrying ({attempt}/3)...")
+                time.sleep(20)
+        return None
+
+    def _resolve_tiktok_secuid(self, username, progress_callback=None):
+        """Try to read the numeric sec_uid from the profile page HTML.
+
+        Returns sec_uid string or None. TikTok may serve a bot-challenge page
+        (empty), in which case None is returned and the caller falls back to
+        asking for a video URL.
+        """
+        try:
+            import re as _re
+            try:
+                import curl_cffi.requests as _req
+                sess = _req.Session(impersonate="chrome")
+            except Exception:
+                import requests as _req
+                sess = _req.Session()
+            if getattr(self, "cookies_file", None) and self.cookies_file.exists():
+                try:
+                    from http.cookiejar import MozillaCookieJar
+                    cj = MozillaCookieJar()
+                    cj.load(str(self.cookies_file), ignore_discard=True, ignore_expires=True)
+                    sess.cookies = cj
+                except Exception:
+                    pass
+            hdr = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) "
+                              "Chrome/136.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+            r = sess.get(f"https://www.tiktok.com/@{username}", headers=hdr, timeout=30)
+            text = r.text or ""
+            m = _re.search(r'"secUid"\s*:\s*"([^"]+)"', text)
+            if m:
+                return m.group(1)
+            m2 = _re.search(r'sec_uid["\']?\s*[:=]\s*["\']([^"\']+)', text)
+            return m2.group(1) if m2 else None
+        except Exception:
+            return None
 
     def scan_instagram_profile(self, profile_input, max_videos=50, progress_callback=None):
         """
@@ -667,6 +863,101 @@ class MetadataScanner:
 
         except Exception as e:
             raise Exception(f"Xiaohongshu profile scan failed: {str(e)}")
+
+    def scan_bilibili_profile(self, profile_url, max_videos=None, progress_callback=None):
+        """
+        Scan a Bilibili user space page for uploaded videos using yt-dlp.
+
+        Bilibili blocks the space page with HTTP 412 unless the URL ends in
+        /video and a Referer/Origin header is sent, so we normalise the input
+        (space.bilibili.com/<uid> -> space.bilibili.com/<uid>/video) and pass
+        those headers through to yt-dlp.
+
+        Args:
+            profile_url: Bilibili space URL, e.g. https://space.bilibili.com/123456
+            max_videos: Maximum number of videos to scan (None = all)
+            progress_callback: Function to call with progress updates
+
+        Returns:
+            dict with channel info and video list
+        """
+        import re
+
+        if progress_callback:
+            progress_callback("Fetching Bilibili space entries...")
+
+        # Normalise: Bilibili needs the /video tab suffix or the space page
+        # extractor is rejected outright (HTTP 352/412).
+        url = (profile_url or "").strip()
+        if url.endswith("/"):
+            url = url[:-1]
+        if not url.endswith("/video"):
+            url = url + "/video"
+
+        # Bilibili requires a valid Referer/Origin or it returns 412.
+        cmd = self.yt_dlp + [
+            "--no-warnings", "--flat-playlist", "--dump-json",
+            "--add-header", "Referer:https://www.bilibili.com/",
+            "--add-header", "Origin:https://www.bilibili.com/",
+            url,
+        ]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
+        entries = []
+        for line in proc.stdout:
+            try:
+                entries.append(json.loads(line))
+            except Exception:
+                continue
+            if progress_callback and len(entries) % 25 == 0:
+                progress_callback(f"Found {len(entries)} videos so far...")
+        proc.wait()
+
+        total = len(entries)
+        if progress_callback:
+            progress_callback(f"Found {total} entries. Processing...")
+
+        videos = []
+        channel_name = None
+        for i, entry in enumerate(entries, 1):
+            if max_videos and len(videos) >= max_videos:
+                break
+
+            vid_id = entry.get("id")
+            if not vid_id:
+                continue
+            title = entry.get("title", "") or f"Bilibili Video {vid_id}"
+            url = f"https://www.bilibili.com/video/{vid_id}"
+
+            if not channel_name:
+                channel_name = (entry.get("playlist_channel") or
+                               entry.get("playlist_uploader") or
+                               entry.get("uploader") or
+                               entry.get("channel") or
+                               f"Bilibili {vid_id}")
+
+            videos.append({
+                "video_id": vid_id,
+                "title": title,
+                "channel_name": channel_name,
+                "description": title,
+                "url": url,
+                "duration": entry.get("duration", 0) or 0,
+                "view_count": entry.get("view_count", 0) or 0
+            })
+
+            if progress_callback and i % 50 == 0:
+                progress_callback(f"Scanning... {i}/{total} ({len(videos)} videos found)")
+
+        if not videos:
+            raise Exception("No videos found in Bilibili space (Bilibili may be "
+                            "rate-limiting the request — try again in a minute).")
+
+        return {
+            "channel_name": channel_name,
+            "platform": "bilibili",
+            "total_entries": total,
+            "videos": videos
+        }
 
     def export_to_excel(self, scan_results, output_path, selected_columns=None):
         """
