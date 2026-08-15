@@ -3792,7 +3792,7 @@ class Dashboard:
     def _cc_parse_response(self, text):
         """Parse Gemini's structured output into {summary, clips, spots, voiceover_style, voiceover_speed}."""
         result = {"summary": "", "summary_emotion": "", "disclaimer": "", "clips": [], "spots": [],
-                  "voiceover_style": "", "voiceover_speed": 0,
+                  "cta": "", "voiceover_style": "", "voiceover_speed": 0,
                   "thumbnail_ts": "", "thumbnail_sec": 0, "thumbnail_text": "",
                   "suggested_title": "", "hashtag_1": "", "hashtag_2": ""}
 
@@ -3907,6 +3907,16 @@ class Dashboard:
                                 "text": text_val.strip(),
                             })
                     break
+
+            elif upper.startswith("CTA") or upper.startswith("CALL TO ACTION"):
+                current_section = "cta"
+                content = chunk.split("\n", 1)
+                if len(content) > 1:
+                    raw = content[1].strip()
+                    # Parse: CTA: text or [CTA] text
+                    cta_match = re.match(r'(?:CTA|\]\s*)?:\s*(.+)', raw, re.IGNORECASE)
+                    if cta_match:
+                        result["cta"] = cta_match.group(1).strip()
 
         # Extract voiceover style/speed from the full text (may appear after
         # the COMMENTARY SPOTS section, with or without --- wrapper)
@@ -4316,6 +4326,7 @@ class Dashboard:
             "Thumbnail Ref": thumb_ref,
             "Voiceover Style": self._cc_last_result.get("voiceover_style", ""),
             "Voiceover Speed (WPM)": self._cc_last_result.get("voiceover_speed", 0),
+            "CTA": self._cc_last_result.get("cta", ""),
             "Hashtag 1": self._cc_last_result.get("hashtag_1", ""),
             "Hashtag 2": self._cc_last_result.get("hashtag_2", ""),
             "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -4932,6 +4943,12 @@ class Dashboard:
                 result = scanner.scan_xiaohongshu_profile(
                     url_input,
                     max_videos=None,  # Get all videos
+                    progress_callback=self.log
+                )
+            elif platform == 'bilibili':
+                result = scanner.scan_bilibili_profile(
+                    url_input,
+                    max_videos=None,
                     progress_callback=self.log
                 )
             else:
