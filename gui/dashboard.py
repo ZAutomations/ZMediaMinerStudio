@@ -3867,7 +3867,11 @@ class Dashboard:
                         if not line or line.startswith("-") or line.startswith("="):
                             continue
                         # Parse: MM:SS-MM:SS | description
-                        match = re.match(r'(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})\s*[|\|]\s*(.+)', line)
+                        # (also accepts the bracketed form some niches emit,
+                        #  e.g. "[0:00-0:05] | [puppy approaches rooster]")
+                        match = re.match(
+                            r'\[?\s*(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})\s*\]?\s*[|\|]\s*(.+)',
+                            line)
                         if match:
                             start_ts, end_ts, desc = match.groups()
                             # Calculate duration
@@ -3880,7 +3884,7 @@ class Dashboard:
                                 "start_sec": start_sec,
                                 "end_sec": end_sec,
                                 "duration": duration,
-                                "description": desc.strip(),
+                                "description": desc.strip().strip('[]').strip(),
                             })
 
             elif upper.startswith("COMMENTARY SPOTS") or upper.startswith("SPOTS"):
@@ -3895,7 +3899,7 @@ class Dashboard:
                         # Parse: MM:SS | [emotion] | commentary text
                         # or legacy: MM:SS | commentary text
                         match = re.match(
-                            r'(\d{1,2}:\d{2})\s*[|\|]\s*'
+                            r'\[?\s*(\d{1,2}:\d{2})\s*\]?\s*[|\|]\s*'
                             r'(?:\[(\w+)\]\s*[|\|]\s*)?(.+)',
                             line)
                         if match:
@@ -3904,19 +3908,9 @@ class Dashboard:
                                 "timestamp": ts,
                                 "seconds": self._ts_to_sec(ts),
                                 "emotion": (emotion or '').strip().lower(),
-                                "text": text_val.strip(),
+                                "text": text_val.strip().strip('[]').strip(),
                             })
                     break
-
-            elif upper.startswith("CTA") or upper.startswith("CALL TO ACTION"):
-                current_section = "cta"
-                content = chunk.split("\n", 1)
-                if len(content) > 1:
-                    raw = content[1].strip()
-                    # Parse: CTA: text or [CTA] text
-                    cta_match = re.match(r'(?:CTA|\]\s*)?:\s*(.+)', raw, re.IGNORECASE)
-                    if cta_match:
-                        result["cta"] = cta_match.group(1).strip()
 
         # Extract voiceover style/speed from the full text (may appear after
         # the COMMENTARY SPOTS section, with or without --- wrapper)
@@ -3961,6 +3955,22 @@ class Dashboard:
             result["hashtag_1"] = h1.group(1).strip().lstrip('#')
         if h2:
             result["hashtag_2"] = h2.group(1).strip().lstrip('#')
+
+        # CTA (call to action). Appears as its own "=== CTA: ... ===" section
+        # which — because it comes *after* COMMENTARY SPOTS, and the section
+        # loop `break`s on spots — is parsed here from the full text. The text
+        # may sit inline on the header ("CTA: comment below") or on the line
+        # after it, and may be wrapped in [brackets].
+        cta_match = re.search(
+            r'^=*\s*(?:CTA|CALL\s+TO\s+ACTION)\s*:?\s*(.*)$',
+            text, re.IGNORECASE | re.MULTILINE)
+        if cta_match:
+            cta_text = re.sub(r'=+\s*$', '', cta_match.group(1)).strip().strip('[]').strip()
+            if not cta_text:
+                after = text[cta_match.end():].lstrip("\n")
+                first = after.split("\n", 1)[0].strip()
+                cta_text = re.sub(r'=+\s*$', '', first).strip().strip('[]').strip()
+            result["cta"] = cta_text
 
         return result
 
