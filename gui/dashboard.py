@@ -2794,6 +2794,8 @@ class Dashboard:
         try:
             if bool(self.cc_vertical_var.get()):
                 cc_slug = "case_commentary_longvideo"
+            elif self.cc_niche_var.get().strip().lower() == "animal storytelling":
+                cc_slug = "case_commentary_animal_story"
         except Exception:
             pass
 
@@ -2999,6 +3001,8 @@ class Dashboard:
         try:
             if bool(self.cc_vertical_var.get()):
                 cc_slug = "case_commentary_longvideo"
+            elif self.cc_niche_var.get().strip().lower() == "animal storytelling":
+                cc_slug = "case_commentary_animal_story"
         except Exception:
             pass
 
@@ -3580,7 +3584,7 @@ class Dashboard:
                 # commentary spots sit inside the cut), so it's already
                 # vertical-compatible — do NOT clobber it back to the courtroom
                 # long-video prompt. Only force longvideo for non-story-cut niches.
-                _STORY_CUT_SLUGS = {"case_commentary_longvideo", "case_commentary_movies"}
+                _STORY_CUT_SLUGS = {"case_commentary_longvideo", "case_commentary_movies", "case_commentary_animal_story"}
                 try:
                     if bool(self.cc_vertical_var.get()) and cc_slug not in _STORY_CUT_SLUGS:
                         cc_slug = "case_commentary_longvideo"

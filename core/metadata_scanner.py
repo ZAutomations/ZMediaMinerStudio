@@ -232,10 +232,12 @@ class MetadataScanner:
         if progress_callback:
             progress_callback("Fetching TikTok profile entries...")
 
-        entries = self.get_playlist_entries(profile_url)
-        total = len(entries)
+        from platforms.tiktok import TikTokScraper
+        scraper = TikTokScraper()
 
         username = profile_url.split("@")[-1].strip("/")
+        entries = scraper.scrape_profile_entries(username, progress_callback=progress_callback)
+        total = len(entries)
 
         if progress_callback:
             progress_callback(f"Found {total} videos in @{username}")
@@ -246,7 +248,7 @@ class MetadataScanner:
             if max_videos and len(videos) >= max_videos:
                 break
 
-            vid_id = entry.get("id") or entry.get("url")
+            vid_id = entry.get("video_id")
             title = entry.get("title", "")
 
             if not vid_id:

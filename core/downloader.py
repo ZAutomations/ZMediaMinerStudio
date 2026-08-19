@@ -89,6 +89,14 @@ class VideoDownloader:
                 return candidates[i]
         return None
 
+    def _pick_tiktok_cookie(self):
+        """Return Path to the best currently-unused TikTok cookie, or None."""
+        from platforms.tiktok import find_tiktok_cookies
+        for path, status in find_tiktok_cookies():
+            if status["logged_in"]:
+                return path
+        return None
+
     @staticmethod
     def _sanitize_filename(name):
         """Sanitize a string for use as a filename — remove chars invalid on Windows."""
@@ -280,9 +288,13 @@ class VideoDownloader:
             ydl_opts['http_headers']['Referer'] = 'https://www.bilibili.com/'
             ydl_opts['http_headers']['Origin'] = 'https://www.bilibili.com/'
 
-        # Add cookies if file exists — use multi-cookie rotation for Instagram
+        # Add cookies if file exists — use multi-cookie rotation for Instagram/TikTok
         if 'instagram.com' in yt_url:
             cookie_path = self._pick_instagram_cookie()
+            if cookie_path:
+                ydl_opts['cookiefile'] = str(cookie_path)
+        elif 'tiktok.com' in yt_url:
+            cookie_path = self._pick_tiktok_cookie()
             if cookie_path:
                 ydl_opts['cookiefile'] = str(cookie_path)
         elif self.cookies_file.exists():
