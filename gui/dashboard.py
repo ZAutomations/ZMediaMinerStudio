@@ -3643,16 +3643,40 @@ class Dashboard:
                     vm = voice_model.get() if voice_model else 'Zephyr'
                     ts = tone_style.get() if tone_style else 'Storytelling'
                     target_words = calc_target_word_count(_wc_dur, vm, ts)
-                    wc_hint = (
-                        f"\n\n📐 WORD COUNT CONSTRAINT (CRITICAL):\n"
-                        f"The final short is ~{_wc_dur:.1f} seconds long. "
-                        f"Your narration must fit within this duration at natural speaking pace.\n"
-                        f"Voice model: {vm} (~{_VOICE_WPM.get(vm, 105)} WPM at 1.0x)\n"
-                        f"Tone/style: {ts} (pacing factor {_TONE_PACING.get(ts, 0.85):.2f})\n"
-                        f"Target total word count for the entire script: ~{target_words} words.\n"
-                        f"Distribute this budget across the summary, clips, and commentary spots.\n"
-                        f"DO NOT exceed {target_words} words total."
-                    )
+                    if cc_slug in _STORY_CUT_SLUGS:
+                        # Story-cut niches COMPRESS a long source into a fixed
+                        # ~target_duration short (continuous narration over the
+                        # stitched cut), so a hard total-word cap is correct — it
+                        # keeps the voiceover from overrunning the cut.
+                        wc_hint = (
+                            f"\n\n📐 WORD COUNT CONSTRAINT (CRITICAL):\n"
+                            f"The final short is ~{_wc_dur:.1f} seconds long. "
+                            f"Your narration must fit within this duration at natural speaking pace.\n"
+                            f"Voice model: {vm} (~{_VOICE_WPM.get(vm, 105)} WPM at 1.0x)\n"
+                            f"Tone/style: {ts} (pacing factor {_TONE_PACING.get(ts, 0.85):.2f})\n"
+                            f"Target total word count for the entire script: ~{target_words} words.\n"
+                            f"Distribute this budget across the summary, clips, and commentary spots.\n"
+                            f"DO NOT exceed {target_words} words total."
+                        )
+                    else:
+                        # Native-length niches (animal / CCTV compilations) are
+                        # NOT one continuous read: the intro plays OVER the opening
+                        # montage and each commentary spot is a short discrete
+                        # overlay at a later timestamp, so the words naturally sum
+                        # to MORE than duration×WPM. A hard total cap here squeezed
+                        # the intro (35-45w) and spots (12-20w) down to a few words
+                        # each. Make it a SOFT pacing guide that PROTECTS each
+                        # section's own target length instead.
+                        wc_hint = (
+                            f"\n\n📐 PACING GUIDE:\n"
+                            f"Speak at a lively pace (voice {vm}, tone {ts}). The intro plays over "
+                            f"the opening montage and each commentary spot is a short discrete overlay, "
+                            f"so this is NOT one continuous read.\n"
+                            f"KEEP EVERY SECTION ITS FULL TARGET LENGTH: the intro/summary must be its "
+                            f"full stated word count and each commentary spot its full stated length. "
+                            f"Do NOT shorten them to hit a smaller total — if the sections naturally sum "
+                            f"to more words, that is correct and expected."
+                        )
                     prompt += wc_hint
 
                 # Qwen3 mode: reduce word limits so Gemini writes shorter text
@@ -3837,6 +3861,30 @@ class Dashboard:
                     while _lines and re.fullmatch(r'[\s\-=_*]+', _lines[-1]):
                         _lines.pop()
                     raw = "\n".join(_lines).strip()
+                    # Gemini sometimes appends a self-report / beat annotation
+                    # to the intro — e.g. "Intro word count: 20/35-45",
+                    # "(24 words)", a lone "[hook]" — which was leaking into the
+                    # spoken Custom Script. Drop any such trailing meta lines,
+                    # then any inline "| (N words) | [hook]" tail glued onto the
+                    # last sentence, then a residual "word count: ..." tail.
+                    def _cc_is_meta_line(ln):
+                        s = ln.strip()
+                        if not s:
+                            return False
+                        if re.match(r'^\(?\s*(?:intro\s+)?word\s*count\s*[:=]', s, re.IGNORECASE):
+                            return True
+                        if re.fullmatch(r'[\(\[]?\s*\d+\s*(?:/\s*\d+(?:\s*-\s*\d+)?)?\s*words?\s*[\)\]]?', s, re.IGNORECASE):
+                            return True
+                        # a line made up only of [bracket]/beat tags and separators
+                        if re.fullmatch(r'(?:\s*\[[^\]]*\]\s*[|｜]?\s*)+', s):
+                            return True
+                        return False
+                    _lines = raw.split("\n")
+                    while _lines and _cc_is_meta_line(_lines[-1]):
+                        _lines.pop()
+                    raw = "\n".join(_lines).strip()
+                    raw = re.sub(r'\s*\|\s*\(?\d+\s*words?\)?\s*(?:\|\s*\[[^\]]*\]\s*)*$', '', raw, flags=re.IGNORECASE).strip()
+                    raw = re.sub(r'\s*(?:intro\s+)?word\s*count\s*[:=].*$', '', raw, flags=re.IGNORECASE).strip()
                     # Optional leading [emotion] tag on the summary
                     emo_match = re.match(r'^\[(\w+)\]\s*(.*)', raw, re.DOTALL)
                     if emo_match:
@@ -3933,7 +3981,7 @@ class Dashboard:
             t_ts = thumb_match.group(1).strip()
             result["thumbnail_ts"] = t_ts
             result["thumbnail_sec"] = self._ts_to_sec(t_ts)
-            result["thumbnail_text"] = thumb_match.group(2).strip()
+            result["thumbnail_text"] = re.sub(r'\s*=+\s*$', '', thumb_match.group(2)).strip()
 
         # Suggested title & hashtags — parsed from the full text to stay
         # independent of section order (some niches output them inline,
@@ -3942,19 +3990,19 @@ class Dashboard:
             r'VIDEO\s+TITLE\s*:\s*(.+)',
             text, re.IGNORECASE)
         if title_match:
-            result["suggested_title"] = title_match.group(1).strip().strip('"').strip("'")
+            result["suggested_title"] = re.sub(r'\s*=+\s*$', '', title_match.group(1)).strip().strip('"').strip("'")
         # Also accept "TITLE:" as an alias
         title_match2 = re.search(
             r'(?<!= )TITLE\s*:\s*(.+)',
             text, re.IGNORECASE)
         if title_match2 and not result["suggested_title"]:
-            result["suggested_title"] = title_match2.group(1).strip().strip('"').strip("'")
+            result["suggested_title"] = re.sub(r'\s*=+\s*$', '', title_match2.group(1)).strip().strip('"').strip("'")
         h1 = re.search(r'HASHTAG\s+1\s*:\s*(.+)', text, re.IGNORECASE)
         h2 = re.search(r'HASHTAG\s+2\s*:\s*(.+)', text, re.IGNORECASE)
         if h1:
-            result["hashtag_1"] = h1.group(1).strip().lstrip('#')
+            result["hashtag_1"] = re.sub(r'\s*=+\s*$', '', h1.group(1)).strip().lstrip('#').strip()
         if h2:
-            result["hashtag_2"] = h2.group(1).strip().lstrip('#')
+            result["hashtag_2"] = re.sub(r'\s*=+\s*$', '', h2.group(1)).strip().lstrip('#').strip()
 
         # CTA (call to action). Appears as its own "=== CTA: ... ===" section
         # which — because it comes *after* COMMENTARY SPOTS, and the section

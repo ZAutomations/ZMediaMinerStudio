@@ -14,6 +14,7 @@ from core.database import VideoDatabase
 from core.downloader import VideoDownloader
 from core.extractor import MediaExtractor
 from core.exporter import DataExporter
+from core.downloader import VideoSkipped
 from platforms.instagram import InstagramScraper
 from platforms.tiktok import TikTokScraper
 from platforms.youtube import YouTubeScraper
@@ -618,6 +619,10 @@ class VideoProcessor:
             log_callback(f"✅ Completed: {video_id}")
 
             return "success"
+
+        except VideoSkipped as e:
+            log_callback(f"⏭️  Skipped: {url}: {str(e)}")
+            return "skipped"
 
         except Exception as e:
             log_callback(f"❌ Failed {url}: {str(e)}")

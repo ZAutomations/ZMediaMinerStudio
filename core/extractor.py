@@ -1,16 +1,15 @@
-import whisper
-import easyocr
+from faster_whisper import WhisperModel
+from rapidocr_onnxruntime import RapidOCR
 from PIL import Image, ImageEnhance, ImageFilter
 from moviepy import VideoFileClip
 import os
 import re
 import warnings
-from config import FRAME_INTERVAL, WHISPER_MODEL, WHISPER_MODEL_DIR, EASYOCR_MODEL_DIR
+from config import FRAME_INTERVAL, WHISPER_MODEL, WHISPER_MODEL_DIR
 
 # Suppress annoying warnings
-warnings.filterwarnings('ignore', category=UserWarning, module='torch')
-warnings.filterwarnings('ignore', category=UserWarning, module='whisper')
-warnings.filterwarnings('ignore', message='.*pin_memory.*')
+warnings.filterwarnings('ignore', category=UserWarning, module='onnxruntime')
+warnings.filterwarnings('ignore', category=UserWarning, module='faster_whisper')
 warnings.filterwarnings('ignore', message='.*FP16 is not supported on CPU.*')
 
 class MediaExtractor:
@@ -20,30 +19,31 @@ class MediaExtractor:
 
     def load_whisper(self):
         if self.whisper_model is None:
-            print("🔄 Loading Whisper model...")
-            # Use local model if bundled in portable package, else download
-            if WHISPER_MODEL_DIR.exists() and (WHISPER_MODEL_DIR / f"{WHISPER_MODEL}.pt").exists():
-                self.whisper_model = whisper.load_model(WHISPER_MODEL, download_root=str(WHISPER_MODEL_DIR))
-                print(f"✅ Whisper model loaded from: {WHISPER_MODEL_DIR}")
-            else:
-                self.whisper_model = whisper.load_model(WHISPER_MODEL)
-                print("✅ Whisper model loaded (downloaded)")
-
-    def load_easyocr(self):
-        if self.ocr_reader is None:
-            # Initialize EasyOCR with English language
-            # gpu=False for CPU, set to True if you have CUDA GPU
-            print("🔄 Loading OCR model...")
-            # Use local models if bundled, else download
-            if EASYOCR_MODEL_DIR.exists() and any(EASYOCR_MODEL_DIR.glob("*.pth")):
-                self.ocr_reader = easyocr.Reader(
-                    ['en'], gpu=False, verbose=False,
-                    model_storage_directory=str(EASYOCR_MODEL_DIR),
+            print("🔄 Loading Whisper model (faster-whisper)...")
+            try:
+                # faster-whisper: CTranslate2 backend, no torch. CPU int8 for speed.
+                self.whisper_model = WhisperModel(
+                    WHISPER_MODEL,
+                    device="cpu",
+                    compute_type="int8",
+                    download_root=str(WHISPER_MODEL_DIR) if WHISPER_MODEL_DIR.exists() else None,
                 )
-                print(f"✅ OCR model loaded from: {EASYOCR_MODEL_DIR}")
-            else:
-                self.ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-                print("✅ OCR model loaded (downloaded)")
+                print("✅ Whisper model loaded")
+            except Exception as e:
+                print(f"❌ Failed to load Whisper model: {e}")
+                self.whisper_model = None
+
+    def load_ocr(self):
+        if self.ocr_reader is None:
+            # RapidOCR (ONNX Runtime) — replaces EasyOCR, no torch needed.
+            # ONNX models are auto-downloaded on first use (~15 MB, en+ch).
+            print("🔄 Loading OCR model (RapidOCR)...")
+            try:
+                self.ocr_reader = RapidOCR()
+                print("✅ OCR model loaded")
+            except Exception as e:
+                print(f"❌ Failed to load OCR model: {e}")
+                self.ocr_reader = None
 
     def clean_ocr_text(self, text):
         """Clean and normalize OCR text"""
@@ -369,7 +369,7 @@ class MediaExtractor:
         return image
 
     def extract_overlay_text(self, video_path, video_id):
-        self.load_easyocr()
+        self.load_ocr()
         clip = None
 
         try:
@@ -386,12 +386,16 @@ class MediaExtractor:
                     img = Image.fromarray(frame)
                     img = self.preprocess_image(img)
 
-                    # Convert to numpy array for EasyOCR
+                    # Convert to numpy array for RapidOCR
                     import numpy as np
                     frame_np = np.array(img)
 
-                    # Extract text using EasyOCR (accepts numpy arrays directly)
-                    results = self.ocr_reader.readtext(frame_np)
+                    # Extract text using RapidOCR — returns (result, elapse).
+                    # result is a list of [box, text, score] or None if empty.
+                    if self.ocr_reader is None:
+                        continue
+                    ocr_result, _ = self.ocr_reader(frame_np)
+                    results = ocr_result if ocr_result else []
 
                     # Sort results by Y-coordinate (top to bottom) for proper reading order
                     sorted_results = sorted(results, key=lambda x: x[0][0][1])
@@ -459,12 +463,43 @@ class MediaExtractor:
             return True  # any error — assume audio present, let Whisper try
 
     def extract_speech(self, video_path):
+        """Extract speech from video using Whisper.
+
+        Returns transcribed text, or empty string if no audio or on error.
+        """
         # Skip audio-less videos (common on TikTok) — Whisper's ffmpeg step
         # would otherwise error out and fail the entire video.
         if not self._has_audio_stream(video_path):
             return ""
 
-        self.load_whisper()
+        # Validate file exists before attempting transcription
+        if not os.path.exists(video_path):
+            print(f"⚠️ Video file not found: {video_path}")
+            return ""
 
-        result = self.whisper_model.transcribe(video_path)
-        return result["text"].strip()
+        try:
+            self.load_whisper()
+
+            if self.whisper_model is None:
+                print("❌ Whisper model failed to load")
+                return ""
+
+            # faster-whisper returns a generator of segments — join their text.
+            segments, _ = self.whisper_model.transcribe(video_path)
+            return " ".join(segment.text.strip() for segment in segments).strip()
+        except AttributeError as e:
+            # Catch 'NoneType' object has no attribute 'write' and similar
+            print(f"❌ Whisper transcription error (model issue): {e}")
+            # Try to reload the model and retry once
+            try:
+                self.whisper_model = None
+                self.load_whisper()
+                if self.whisper_model is not None:
+                    segments, _ = self.whisper_model.transcribe(video_path)
+                    return " ".join(segment.text.strip() for segment in segments).strip()
+            except Exception as retry_err:
+                print(f"❌ Whisper retry failed: {retry_err}")
+            return ""
+        except Exception as e:
+            print(f"❌ Whisper transcription error: {e}")
+            return ""

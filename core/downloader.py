@@ -20,6 +20,11 @@ def suppress_output():
         sys.stdout = old_stdout
 
 
+class VideoSkipped(Exception):
+    """Raised when a video should be skipped (e.g. photo post on Instagram)."""
+    pass
+
+
 class VideoDownloader:
     # Platforms that should save files as "{video_id}.ext" (no title in the
     # filename) — their IDs are stable and titles add noise / length issues.
@@ -70,6 +75,14 @@ class VideoDownloader:
         from platforms.instagram import _check_cookie_file
         for path in self._all_cookie_candidates():
             status = _check_cookie_file(path)
+            if status["logged_in"]:
+                return path
+        return None
+
+    def _pick_tiktok_cookie(self):
+        """Return Path to the best currently-unused TikTok cookie, or None."""
+        from platforms.tiktok import find_tiktok_cookies
+        for path, status in find_tiktok_cookies():
             if status["logged_in"]:
                 return path
         return None
@@ -280,9 +293,13 @@ class VideoDownloader:
             ydl_opts['http_headers']['Referer'] = 'https://www.bilibili.com/'
             ydl_opts['http_headers']['Origin'] = 'https://www.bilibili.com/'
 
-        # Add cookies if file exists — use multi-cookie rotation for Instagram
+        # Add cookies if file exists — use multi-cookie rotation for Instagram/TikTok
         if 'instagram.com' in yt_url:
             cookie_path = self._pick_instagram_cookie()
+            if cookie_path:
+                ydl_opts['cookiefile'] = str(cookie_path)
+        elif 'tiktok.com' in yt_url:
+            cookie_path = self._pick_tiktok_cookie()
             if cookie_path:
                 ydl_opts['cookiefile'] = str(cookie_path)
         elif self.cookies_file.exists():
@@ -434,9 +451,8 @@ class VideoDownloader:
                             "  and this system will auto-rotate through them."
                         )
                     if 'No video formats found' in error_msg:
-                        raise Exception(
-                            "❌ Instagram post has no video!\n"
-                            "This is a photo post, not a video. Skipping."
+                        raise VideoSkipped(
+                            "⏭️ Instagram post has no video (photo post) — skipped"
                         )
 
                 # Check for auth errors
@@ -464,7 +480,7 @@ class VideoDownloader:
                     last_error = e
                     print(f"   ⚠️  TikTok anti-bot challenge — will retry on a fresh connection")
                     if progress_callback:
-                        progress_callback("   ⏳ TikTok rate-limit — retrying...")
+                        progress_callback("   ⏳ TikTok anti-bot block — retrying...")
                     continue
 
                 # Transient network / TLS corruption — the encrypted stream got
@@ -625,19 +641,17 @@ class VideoDownloader:
     def _detect_voice_in_audio(self, audio_path):
         """Detect if audio contains human voice/speech using Whisper"""
         try:
-            import whisper
+            from faster_whisper import WhisperModel
             print(f"🔍 Checking for voiceover...")
 
-            # Load a small Whisper model for quick detection
-            model = whisper.load_model("tiny")
+            # Load a small faster-whisper model for quick detection (no torch)
+            model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
             # Transcribe the audio
-            result = model.transcribe(str(audio_path), language="en", fp16=False)
+            segments, _ = model.transcribe(str(audio_path), language="en")
+            transcription = " ".join(seg.text.strip() for seg in segments).strip()
 
             # Check if any text was detected
-            transcription = result.get("text", "").strip()
-
-            # Consider it has voice if:
             # 1. Transcription has at least 10 characters
             # 2. Transcription has at least 2 words
             words = transcription.split()

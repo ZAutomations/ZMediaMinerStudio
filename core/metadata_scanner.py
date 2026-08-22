@@ -24,7 +24,7 @@ class MetadataScanner:
         """Run command and return output"""
         return subprocess.run(cmd, capture_output=True, text=True)
 
-    def get_playlist_entries(self, url, flat=True, progress_callback=None):
+    def get_playlist_entries(self, url, flat=True, progress_callback=None, stderr=None):
         """Get all entries from playlist/channel without downloading
 
         Args:
@@ -37,16 +37,24 @@ class MetadataScanner:
                   overhead of N separate subprocess invocations.
             progress_callback: Optional function called with a live count as
                   entries stream in (so the UI doesn't look frozen).
+            stderr: Optional list that receives yt-dlp's stderr lines so
+                  callers can detect platform blocks (e.g. TikTok challenges).
         """
         cmd = self.yt_dlp + ["--no-warnings", "--dump-json", url]
         if flat:
             cmd.insert(-1, "--flat-playlist")
+        # Let yt-dlp sign JS-protected requests (TikTok X-Bogus, YouTube PO
+        # tokens). Harmless when no JS runtime is installed.
+        cmd += ["--js-runtimes", "node"]
         # Pass cookies so platforms that block anonymous access (TikTok) can
         # enumerate profiles. yt-dlp filters the cookie jar by domain, so a
-        # shared cookies.txt is safe for all platforms.
-        if getattr(self, "cookies_file", None) and self.cookies_file.exists():
+        # shared cookies.txt is safe for all platforms. An empty/zero-byte
+        # cookies file makes yt-dlp abort with a Netscape-format error, so
+        # only pass it when it actually contains cookies.
+        if (getattr(self, "cookies_file", None) and self.cookies_file.exists()
+                and self.cookies_file.stat().st_size > 0):
             cmd += ["--cookies", str(self.cookies_file)]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         entries = []
         for line in proc.stdout:
             try:
@@ -56,6 +64,8 @@ class MetadataScanner:
             if progress_callback and len(entries) % 25 == 0:
                 progress_callback(f"Found {len(entries)} videos so far...")
         proc.wait()
+        if stderr is not None:
+            stderr.extend(proc.stderr.read().splitlines())
         return entries
 
     def sanitize_sheet_name(self, name):
@@ -242,76 +252,11 @@ class MetadataScanner:
         if progress_callback:
             progress_callback("Fetching TikTok profile entries...")
 
-        import re as _re
-        _vid_m = _re.search(r"/video/(\d+)", profile_url)
+        from platforms.tiktok import TikTokScraper
+        scraper = TikTokScraper()
+
         username = profile_url.split("@")[-1].split("/")[0].strip("/") or "tiktok"
-
-        # 1) Video URL -> bootstrap sec_uid from the video, then list profile.
-        if _vid_m:
-            if progress_callback:
-                progress_callback("🎯 Video URL detected — reading creator ID to list full profile...")
-            sec = self._tiktok_secuid_from_video(profile_url, progress_callback)
-            if sec:
-                return self._scan_tiktok_by_secuid(sec, username, max_videos, progress_callback)
-
-        # 2) @username path
-
-        # TikTok intermittently serves a JS anti-bot challenge that makes
-        # yt-dlp emit 0 JSON lines instead of failing loudly — so the scan
-        # silently reports "Found 0 videos". Retry on a fresh connection,
-        # same as the downloader's TikTok retry (verified to succeed on retry).
-        MAX_TT_ATTEMPTS = 3
-        _tt_hard_marker = "secondary user id"
-        _tt_challenge_markers = (
-            "unexpected response",   # "Unexpected response from webpage request"
-            "universal data",        # "Unable to extract universal data for rehydration"
-            "js challenge",          # "Solving JS challenge using native Python implementation"
-            "sign in to confirm",    # bot interstitial
-            _tt_hard_marker,
-        )
-
-        entries = []
-        last_err = ""
-        for attempt in range(1, MAX_TT_ATTEMPTS + 1):
-            stderr_buf = []
-            entries = self.get_playlist_entries(
-                profile_url, flat=True, progress_callback=progress_callback, stderr=stderr_buf
-            )
-            if entries:
-                break
-            err_text = "".join(stderr_buf).lower()
-            last_err = err_text
-            # Hard block: TikTok hid the sec_uid behind a challenge. Try to
-            # resolve it from the profile page ourselves.
-            if _tt_hard_marker in err_text:
-                sec = self._resolve_tiktok_secuid(username, progress_callback)
-                if sec:
-                    return self._scan_tiktok_by_secuid(sec, username, max_videos, progress_callback)
-                break
-            if any(m in err_text for m in _tt_challenge_markers) and attempt < MAX_TT_ATTEMPTS:
-                if progress_callback:
-                    progress_callback(
-                        f"   ⚠️  TikTok anti-bot challenge — retrying ({attempt}/{MAX_TT_ATTEMPTS})..."
-                    )
-                time.sleep(20)
-                continue
-            break
-
-        if not entries:
-            raise Exception(
-                "❌ TikTok blocked this profile scan.\n\n"
-                "TikTok now requires the creator's numeric channel ID (sec_uid) to "
-                "list videos, and it hides that ID behind a bot-challenge on the "
-                "profile page. This is a platform-side block, not a broken video.\n\n"
-                "What works right now:\n"
-                "  • Paste a VIDEO URL from this creator (e.g. "
-                "https://www.tiktok.com/@user/video/12345). The scanner reads the "
-                "creator's ID from that one video and lists the whole profile.\n"
-                "  • Or wait a few minutes (TikTok rate-limits repeated requests) and "
-                "use 'Retry Failed'.\n\n"
-                f"Details: {last_err[:300]}"
-            )
-
+        entries = scraper.scrape_profile_entries(username, progress_callback=progress_callback)
         total = len(entries)
 
         if progress_callback:
@@ -323,7 +268,7 @@ class MetadataScanner:
             if max_videos and len(videos) >= max_videos:
                 break
 
-            vid_id = entry.get("id") or entry.get("url")
+            vid_id = entry.get("video_id")
             title = entry.get("title", "")
 
             if not vid_id:
@@ -354,125 +299,6 @@ class MetadataScanner:
             "total_entries": total,
             "videos": videos
         }
-
-    def _scan_tiktok_by_secuid(self, sec_uid, username, max_videos, progress_callback=None):
-        """List a creator's videos via the numeric channel id (sec_uid)."""
-        if progress_callback:
-            progress_callback(f"📡 Listing creator via channel ID (sec_uid)...")
-        entries = []
-        last_err = ""
-        for attempt in range(1, 4):
-            stderr_buf = []
-            entries = self.get_playlist_entries(
-                f"tiktokuser:{sec_uid}", flat=True,
-                progress_callback=progress_callback, stderr=stderr_buf
-            )
-            if entries:
-                break
-            err_text = "".join(stderr_buf).lower()
-            last_err = err_text
-            if any(m in err_text for m in ("unexpected response", "universal data", "js challenge")) \
-                    and attempt < 3:
-                if progress_callback:
-                    progress_callback(f"   ⚠️  TikTok anti-bot challenge — retrying ({attempt}/3)...")
-                time.sleep(20)
-                continue
-            break
-        total = len(entries)
-        if progress_callback:
-            progress_callback(f"Found {total} videos in @{username}")
-        videos = []
-        for i, entry in enumerate(entries, 1):
-            if max_videos and len(videos) >= max_videos:
-                break
-            vid_id = entry.get("id") or entry.get("url")
-            title = entry.get("title", "")
-            if not vid_id:
-                continue
-            video_url = entry.get("url") or f"https://www.tiktok.com/@{username}/video/{vid_id}"
-            videos.append({
-                "video_id": vid_id,
-                "title": title,
-                "username": username,
-                "description": entry.get("description") or title,
-                "url": video_url,
-                "duration": entry.get("duration", 0),
-                "view_count": entry.get("view_count", 0) or 0,
-            })
-            if progress_callback and i % 10 == 0:
-                progress_callback(f"Scanning... {i}/{total}")
-        return {
-            "channel_name": username,
-            "platform": "tiktok",
-            "total_entries": total,
-            "videos": videos,
-        }
-
-    def _tiktok_secuid_from_video(self, video_url, progress_callback=None):
-        """Extract the uploader's sec_uid (channel_id) from one video.
-
-        Uses the intermittent-but-working download path. Returns sec_uid or None.
-        """
-        for attempt in range(1, 4):
-            try:
-                cmd = self.yt_dlp + ["--no-warnings", "--dump-json", video_url]
-                if getattr(self, "cookies_file", None) and self.cookies_file.exists():
-                    cmd += ["--cookies", str(self.cookies_file)]
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
-                out = (proc.stdout or "").strip()
-                if out:
-                    import json as _json
-                    d = _json.loads(out)
-                    sec = d.get("channel_id") or d.get("uploader_id")
-                    if sec:
-                        return sec
-            except Exception:
-                pass
-            if attempt < 3:
-                if progress_callback:
-                    progress_callback(f"   ⚠️  TikTok anti-bot challenge on video — retrying ({attempt}/3)...")
-                time.sleep(20)
-        return None
-
-    def _resolve_tiktok_secuid(self, username, progress_callback=None):
-        """Try to read the numeric sec_uid from the profile page HTML.
-
-        Returns sec_uid string or None. TikTok may serve a bot-challenge page
-        (empty), in which case None is returned and the caller falls back to
-        asking for a video URL.
-        """
-        try:
-            import re as _re
-            try:
-                import curl_cffi.requests as _req
-                sess = _req.Session(impersonate="chrome")
-            except Exception:
-                import requests as _req
-                sess = _req.Session()
-            if getattr(self, "cookies_file", None) and self.cookies_file.exists():
-                try:
-                    from http.cookiejar import MozillaCookieJar
-                    cj = MozillaCookieJar()
-                    cj.load(str(self.cookies_file), ignore_discard=True, ignore_expires=True)
-                    sess.cookies = cj
-                except Exception:
-                    pass
-            hdr = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                              "AppleWebKit/537.36 (KHTML, like Gecko) "
-                              "Chrome/136.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml",
-                "Accept-Language": "en-US,en;q=0.9",
-            }
-            r = sess.get(f"https://www.tiktok.com/@{username}", headers=hdr, timeout=30)
-            text = r.text or ""
-            m = _re.search(r'"secUid"\s*:\s*"([^"]+)"', text)
-            if m:
-                return m.group(1)
-            m2 = _re.search(r'sec_uid["\']?\s*[:=]\s*["\']([^"\']+)', text)
-            return m2.group(1) if m2 else None
-        except Exception:
-            return None
 
     def scan_instagram_profile(self, profile_input, max_videos=50, progress_callback=None):
         """

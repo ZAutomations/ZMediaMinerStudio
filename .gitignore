@@ -56,3 +56,6 @@ check_missing.py
 install_project.bat
 linkssss.txt
 test_xhs.py
+
+# Lightweight venv (machine-specific, do not commit)
+venv_light/
