@@ -109,11 +109,22 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo.
 
+:: ---- Step 5: Ensure faster-whisper + OCR + a good OpenCV ----
+:: core/extractor.py now needs faster-whisper (not openai-whisper) and
+:: rapidocr-onnxruntime.  rapidocr pulls opencv-python and latest pip picks the
+:: broken 5.0.0.93 dev build (no CascadeClassifier) - so pin a stable 4.x.
+echo [5/5] Installing ASR/OCR stack (faster-whisper, rapidocr, opencv 4.11)...
+call "%VENV_DIR%\Scripts\pip.exe" install --timeout 120 --retries 5 -q faster-whisper rapidocr-onnxruntime "opencv-python==4.11.0.86"
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARNING] ASR/OCR install had issues. A fresh internet connection is needed.
+)
+echo.
+
 :: ---- Verify ----
 echo ============================================================
 echo  Verification
 echo ============================================================
-call "%VENV_DIR%\Scripts\python.exe" -c "import yt_dlp, google.genai, google.auth, google.oauth2.service_account, whisper, easyocr, PIL, moviepy, instaloader, requests, pandas, openpyxl, torch, curl_cffi; print('OK: all packages imported')" 2>&1
+call "%VENV_DIR%\Scripts\python.exe" -c "import yt_dlp, google.genai, google.auth, google.oauth2.service_account, whisper, easyocr, PIL, moviepy, instaloader, requests, pandas, openpyxl, torch, curl_cffi, faster_whisper, rapidocr_onnxruntime, cv2; print('OK: all packages imported')" 2>&1
 if %ERRORLEVEL% EQU 0 (
     echo.
     echo ============================================================

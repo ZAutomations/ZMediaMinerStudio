@@ -5,8 +5,10 @@ cd /d "%~dp0"
 REM -- Force UTF-8 mode (fixes ASCII encoding on Windows) --
 set PYTHONUTF8=1
 
-REM -- Check venv_light exists, if not show setup instructions --
-if not exist "%~dp0venv_light\Scripts\python.exe" (
+REM -- Pick the venv: prefer venv_light (dev PC), fall back to venv (this PC) --
+set "PY_EXE=%~dp0venv_light\Scripts\python.exe"
+if not exist "%PY_EXE%" set "PY_EXE=%~dp0venv\Scripts\python.exe"
+if not exist "%PY_EXE%" (
     echo ============================================================
     echo   First-time setup required!
     echo   Double-click:  setup\install_dependencies.bat
@@ -19,8 +21,8 @@ echo Starting MediaMiner Studio...
 echo (Keep this window open. If the app fails, the error appears below.)
 echo.
 
-REM -- Use the torch-free venv_light -- errors print to this console --
-"%~dp0venv_light\Scripts\python.exe" "%~dp0main.py"
+REM -- Run the app -- errors print to this console --
+"%PY_EXE%" "%~dp0main.py"
 
 if errorlevel 1 (
     echo.
